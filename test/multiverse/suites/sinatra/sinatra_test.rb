@@ -2,7 +2,7 @@
 class SinatraRouteTestApp < Sinatra::Base
   configure do
     # display exceptions so we see what's going on
-    enable :raise_errors
+    # enable :raise_errors
     disable :show_exceptions
 
     # create a condition (sintra's version of a before_filter) that returns the
@@ -12,9 +12,6 @@ class SinatraRouteTestApp < Sinatra::Base
         halt 404 unless boolean
       end
     end
-
-    # treat errors like production for testing purposes
-    set :show_exceptions, false
   end
 
   get '/user/login' do
@@ -38,7 +35,7 @@ class SinatraRouteTestApp < Sinatra::Base
     "I'm not a teapot."
   end
 
-  class Error < Exception; end
+  class Error < StandardError; end
   error(Error) { halt 200, 'nothing happened' }
   condition { raise Error }
   get('/error') { }
@@ -111,6 +108,11 @@ class SinatraTest < Test::Unit::TestCase
     get '/error'
     assert_equal 200, last_response.status
     assert_equal "nothing happened", last_response.body
+  end
+
+  def test_sees_handled_error
+    get '/error'
+    assert_equal 1, ::NewRelic::Agent.agent.error_collector.errors.size
   end
 
   def test_correct_pattern
