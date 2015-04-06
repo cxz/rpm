@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 # == New Relic Initialization
 #
 # When installed as a gem, you can activate the New Relic agent one of the following ways:
@@ -17,6 +21,7 @@
 # For other frameworks, or to manage the agent manually, invoke NewRelic::Agent#manual_start
 # directly.
 #
+
 require 'new_relic/control'
 if defined?(Merb) && defined?(Merb::BootLoader)
   module NewRelic
@@ -27,18 +32,18 @@ if defined?(Merb) && defined?(Merb::BootLoader)
       end
     end
   end
-elsif defined? Rails
-  if Rails.respond_to?(:version) && Rails.version > '3'
+elsif defined?(Rails::VERSION)
+  if Rails::VERSION::MAJOR.to_i >= 3
     module NewRelic
       class Railtie < Rails::Railtie
 
         initializer "newrelic_rpm.start_plugin" do |app|
-	  NewRelic::Control.instance.init_plugin(:config => app.config)
+          NewRelic::Control.instance.init_plugin(:config => app.config)
         end
       end
     end
   else
-    # After verison 2.0 of Rails we can access the configuration directly.
+    # After version 2.0 of Rails we can access the configuration directly.
     # We need it to add dev mode routes after initialization finished.
     config = nil
     config = Rails.configuration if Rails.respond_to?(:configuration)

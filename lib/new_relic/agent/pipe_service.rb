@@ -1,15 +1,25 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic
   module Agent
     class PipeService
-      attr_reader :channel_id, :buffer
+      attr_reader :channel_id, :buffer, :pipe
       attr_accessor :request_timeout, :agent_id, :collector
-      
+
       def initialize(channel_id)
         @channel_id = channel_id
         @collector = NewRelic::Control::Server.new(:name => 'parent',
                                                    :port => 0)
+        @pipe = NewRelic::Agent::PipeChannelManager.channels[@channel_id]
+        if @pipe && @pipe.parent_pid != $$
+          @pipe.after_fork_in_child
+        else
+          NewRelic::Agent.logger.error("No communication channel to parent process, please see https://newrelic.com/docs/ruby/resque-instrumentation for more information.")
+        end
       end
-      
+
       def connect(config)
         nil
       end
@@ -18,26 +28,33 @@ module NewRelic
         []
       end
 
-      def metric_data(last_harvest_time, now, unsent_timeslice_data)
-        write_to_pipe(:stats => hash_from_metric_data(unsent_timeslice_data))
+      def analytic_event_data(events)
+        write_to_pipe(:analytic_event_data, events) if events
+      end
+
+      def custom_event_data(events)
+        write_to_pipe(:custom_event_data, events) if events
+      end
+
+      def metric_data(unsent_timeslice_data)
+        write_to_pipe(:metric_data, unsent_timeslice_data)
         {}
       end
 
       def transaction_sample_data(transactions)
-        write_to_pipe(:transaction_traces => transactions) if transactions
+        write_to_pipe(:transaction_sample_data, transactions) if transactions
       end
 
       def error_data(errors)
-        write_to_pipe(:error_traces => errors) if errors
+        write_to_pipe(:error_data, errors) if errors
       end
 
       def sql_trace_data(sql)
-        write_to_pipe(:sql_traces => sql) if sql
+        write_to_pipe(:sql_trace_data, sql) if sql
       end
-      
+
       def shutdown(time)
-        write_to_pipe('EOF')
-        NewRelic::Agent::PipeChannelManager.channels[@channel_id].close
+        @pipe.close if @pipe
       end
 
       # Invokes the block it is passed.  This is used to implement HTTP
@@ -46,21 +63,21 @@ module NewRelic
       def session
         yield
       end
-      
-      private
 
-      def hash_from_metric_data(metric_data)
-        metric_hash = {}
-        metric_data.each do |metric_entry|
-          metric_hash[metric_entry.metric_spec] = metric_entry
-        end
-        metric_hash
+      def reset_metric_id_cache
+        # we don't cache metric IDs, so nothing to do
       end
 
-      def write_to_pipe(data)
-        NewRelic::Agent::PipeChannelManager.channels[@channel_id].write(data)
-      rescue => e
-        NewRelic::Agent.logger.error("#{e.message}: Unable to send data to parent process, please see https://newrelic.com/docs/ruby/resque-instrumentation for more information.")
+      private
+
+      def marshal_payload(data)
+        NewRelic::LanguageSupport.with_cautious_gc do
+          Marshal.dump(data)
+        end
+      end
+
+      def write_to_pipe(endpoint, data)
+        @pipe.write(marshal_payload([endpoint, data])) if @pipe
       end
     end
   end

@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'test_helper'))
 require 'new_relic/control/class_methods'
 
@@ -6,7 +10,7 @@ class BaseClassMethods
   include NewRelic::Control::ClassMethods
 end
 
-class NewRelic::Control::ClassMethodsTest < Test::Unit::TestCase
+class NewRelic::Control::ClassMethodsTest < Minitest::Test
   def setup
     @base = ::BaseClassMethods.new
     super
@@ -32,12 +36,12 @@ class NewRelic::Control::ClassMethodsTest < Test::Unit::TestCase
       @base.load_framework_class(type)
     end
   end
-  
+
   def test_load_framework_class_missing
     # this is used to allow other people to insert frameworks without
     # having the file in our agent, i.e. define your own
     # NewRelic::Control::Framework::FooBar
-    assert_raise(NameError) do
+    assert_raises(NameError) do
       @base.load_framework_class('missing')
     end
   end

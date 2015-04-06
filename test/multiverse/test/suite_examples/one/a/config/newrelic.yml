@@ -3,7 +3,6 @@ development:
   browser_monitoring:
     auto_instrument: true
   error_collector:
-    capture_source: true
     enabled: true
   apdex_t: 0.5
   ssl: false
@@ -13,7 +12,6 @@ development:
   app_name: test
   host: 127.0.0.1
   api_host: 127.0.0.1
-  port: <%= 30_000 + ($$ % 10_000) %>
   transaction_tracer:
     record_sql: obfuscated
     enabled: true

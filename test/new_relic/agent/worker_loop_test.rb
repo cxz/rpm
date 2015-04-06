@@ -1,10 +1,12 @@
-ENV['SKIP_RAILS'] = 'true'
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','test_helper'))
 
-class NewRelic::Agent::WorkerLoopTest < Test::Unit::TestCase
+class NewRelic::Agent::WorkerLoopTest < Minitest::Test
   def setup
     @worker_loop = NewRelic::Agent::WorkerLoop.new
-    @test_start_time = Time.now
   end
 
   def test_add_task
@@ -17,18 +19,18 @@ class NewRelic::Agent::WorkerLoopTest < Test::Unit::TestCase
   end
 
   def test_with_duration
-    worker_loop = NewRelic::Agent::WorkerLoop.new(:duration => 0.1)
+    freeze_time
 
-    # Advance in small increments vs our period so time will pass over the
-    # nasty multiple calls to Time.now that WorkerLoop makes
-    Time.stubs(:now).returns(*ticks(0, 0.12, 0.005))
+    period = 5.0
+    worker_loop = NewRelic::Agent::WorkerLoop.new(:duration => 16.0)
 
-    count = 0
-    worker_loop.run(0.04) do
-      count += 1
+    def worker_loop.sleep(duration)
+      advance_time(duration)
     end
 
-    assert_equal 2, count
+    count = 0
+    worker_loop.run(period) { count += 1 }
+    assert_equal 3, count
   end
 
   def test_duration_clock_starts_with_run
@@ -59,26 +61,38 @@ class NewRelic::Agent::WorkerLoopTest < Test::Unit::TestCase
     assert done
   end
 
-  class BadBoy < StandardError; end
-
   def test_task_error__exception
     expects_logging(:error, any_parameters)
     @worker_loop.run(0) do
       @worker_loop.stop
-      raise BadBoy, "oops"
+      raise NewRelic::TestHelper::Exception::TestError, "oops"
     end
   end
 
-  def test_task_error__server
-    expects_no_logging(:error)
-    expects_logging(:debug, any_parameters)
-    @worker_loop.run(0) do
-      @worker_loop.stop
-      raise NewRelic::Agent::ServerError, "Runtime Error Test"
+  def test_worker_loop_propagates_errors_given_the_option
+    @worker_loop = NewRelic::Agent::WorkerLoop.new(
+      :limit => 2,
+      :propagate_errors => true
+    )
+
+    assert_raises NewRelic::TestHelpers::Exceptions::TestError do
+      @worker_loop.run(0) do
+        raise NewRelic::TestHelpers::Exceptions::TestError
+      end
     end
+  end
+
+  def test_dynamically_adjusts_the_period_once_the_loop_has_been_started
+    freeze_time
+
+    worker_loop = NewRelic::Agent::WorkerLoop.new(:limit => 2)
+
+    worker_loop.expects(:sleep).with(5.0)
+    worker_loop.expects(:sleep).with(7.0)
+    worker_loop.run(5.0) { advance_time(5.0); worker_loop.period = 7.0 }
   end
 
   def ticks(start, finish, step)
-    (start..finish).step(step).to_a
+    (start..finish).step(step).map{|i| Time.at(i)}
   end
 end

@@ -1,53 +1,38 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 # https://newrelic.atlassian.net/browse/RUBY-765
 require 'fake_collector'
 
-class HttpResponseCodeTest < Test::Unit::TestCase
-  def setup
-    $collector ||= NewRelic::FakeCollector.new
-    $collector.reset
-    $collector.run
-    NewRelic::Agent.manual_start(:send_data_on_exit => false)
-    @agent = NewRelic::Agent.instance
-  end
+class HttpResponseCodeTest < Minitest::Test
+  include MultiverseHelpers
 
-  def teardown
-    $collector.reset
-    NewRelic::Agent.shutdown
-  end
+  setup_and_teardown_agent
 
   def test_request_entity_too_large
-    $collector.mock['metric_data'] = [413, {'exception' => {'error_type' => 'RuntimeError', 'message' => 'too much'}}]
+    $collector.stub_exception('metric_data', {'error_type' => 'RuntimeError', 'message' => 'too much'}, 413)
 
-    @agent.stats_engine.get_stats_no_scope('Custom/too_big') \
-      .record_data_point(1)
-    assert_equal 1, @agent.stats_engine \
-      .get_stats_no_scope('Custom/too_big').call_count
+    NewRelic::Agent.increment_metric('Custom/too_big')
+    assert_metrics_recorded(['Custom/too_big'])
 
-    @agent.send(:harvest_and_send_timeslice_data)
+    agent.send(:harvest_and_send_timeslice_data)
 
-    # make sure the data gets thrown away without crashing
-    assert_equal 0, @agent.stats_engine \
-      .get_stats_no_scope('Custom/too_big').call_count
-
-    # make sure we actually talked to the collector
-    assert_equal(1, $collector.agent_data.select{|x| x.action == 'metric_data'}.size)
+    # make sure the data gets thrown away after we called collector without crashing
+    assert_metrics_not_recorded(['Custom/too_big'])
+    assert_equal(1, $collector.calls_for('metric_data').size)
   end
 
   def test_unsupported_media_type
-    $collector.mock['metric_data'] = [415, {'exception' => {'error_type' => 'RuntimeError', 'message' => 'looks bad'}}]
+    $collector.stub_exception('metric_data', {'error_type' => 'RuntimeError', 'message' => 'looks bad'}, 415)
 
-    @agent.stats_engine.get_stats_no_scope('Custom/too_big') \
-      .record_data_point(1)
-    assert_equal 1, @agent.stats_engine \
-      .get_stats_no_scope('Custom/too_big').call_count
+    NewRelic::Agent.increment_metric('Custom/too_big')
+    assert_metrics_recorded(['Custom/too_big'])
 
-    @agent.send(:harvest_and_send_timeslice_data)
+    agent.send(:harvest_and_send_timeslice_data)
 
-    # make sure the data gets thrown away without crashing
-    assert_equal 0, @agent.stats_engine \
-      .get_stats_no_scope('Custom/too_big').call_count
-
-    # make sure we actually talked to the collector
-    assert_equal(1, $collector.agent_data.select{|x| x.action == 'metric_data'}.size)
+    # make sure the data gets thrown away after we called collector without crashing
+    assert_metrics_not_recorded(['Custom/too_big'])
+    assert_equal(1, $collector.calls_for('metric_data').size)
   end
 end

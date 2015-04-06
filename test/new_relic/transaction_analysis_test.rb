@@ -1,6 +1,10 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..', 'test_helper'))
 require 'new_relic/transaction_analysis'
-class NewRelic::TransactionAnalysisTest < Test::Unit::TestCase
+class NewRelic::TransactionAnalysisTest < Minitest::Test
   include NewRelic::TransactionAnalysis
 
   # these are mostly stub tests just making sure that the API doesn't

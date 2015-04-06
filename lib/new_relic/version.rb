@@ -1,4 +1,8 @@
 #!/usr/bin/ruby
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 
 module NewRelic
   module VERSION #:nodoc:
@@ -7,12 +11,12 @@ module NewRelic
     end
 
     MAJOR = 3
-    MINOR = 5
-    TINY  = 6
+    MINOR = 11
+    TINY  = 1
 
     begin
       require File.join(File.dirname(__FILE__), 'build')
-    rescue LoadError => e
+    rescue LoadError
       BUILD = nil
     end
 

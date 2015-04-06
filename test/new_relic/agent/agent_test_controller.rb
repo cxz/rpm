@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 # Defining a test controller class with a superclass, used to
 # verify correct attribute inheritence
 class NewRelic::Agent::SuperclassController <  ActionController::Base
@@ -7,6 +11,7 @@ class NewRelic::Agent::SuperclassController <  ActionController::Base
 end
 # This is a controller class used in testing controller instrumentation
 class NewRelic::Agent::AgentTestController < NewRelic::Agent::SuperclassController
+  include NewRelic::TestHelpers::Exceptions
   # filter_parameter_logging :social_security_number
 
   @@headers_to_add = nil
@@ -38,8 +43,6 @@ class NewRelic::Agent::AgentTestController < NewRelic::Agent::SuperclassControll
   def oops
     raise "error in before filter"
   end
-  class TestException < RuntimeError
-  end
 
   def rescue_action_locally(exception)
     if exception.is_a? TestException
@@ -50,21 +53,25 @@ class NewRelic::Agent::AgentTestController < NewRelic::Agent::SuperclassControll
     raise "error in action"
   end
   def entry_action
-    perform_action_with_newrelic_trace('internal_action') do
+    perform_action_with_newrelic_trace(:name => 'internal_action') do
       internal_action
     end
   end
 
   def self.set_some_headers(hash_of_headers)
-    @@headers_to_add ||= {}
-    @@headers_to_add.merge!(hash_of_headers)
+    if ::Rails::VERSION::MAJOR.to_i == 4
+      NewRelic::Agent.instance.events.notify(:before_call, hash_of_headers)
+    else
+      @@headers_to_add ||= {}
+      @@headers_to_add.merge!(hash_of_headers)
+    end
   end
 
   def self.clear_headers
     @@headers_to_add = nil
   end
 
-  def newrelic_request_headers
+  def newrelic_request_headers(_)
     @@headers_to_add ||= {}
   end
 

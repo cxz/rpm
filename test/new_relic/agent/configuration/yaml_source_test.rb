@@ -1,8 +1,12 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','..','test_helper'))
 require 'new_relic/agent/configuration/yaml_source'
 
 module NewRelic::Agent::Configuration
-  class YamlSourceTest < Test::Unit::TestCase
+  class YamlSourceTest < Minitest::Test
     def setup
       @test_yml_path = File.expand_path(File.join(File.dirname(__FILE__),
                                                  '..','..','..',
@@ -33,11 +37,15 @@ module NewRelic::Agent::Configuration
     end
 
     def test_should_load_the_config_for_the_correct_env
-      assert_not_equal 'the.wrong.host', @source[:host]
+      refute_equal 'the.wrong.host', @source[:host]
     end
 
     def test_should_convert_to_dot_notation
       assert_equal 'raw', @source[:'transaction_tracer.record_sql']
+    end
+
+    def test_should_still_have_nested_hashes_around
+      refute_nil @source[:transaction_tracer]
     end
 
     def test_should_ignore_apdex_f_setting_for_transaction_threshold
@@ -54,19 +62,19 @@ module NewRelic::Agent::Configuration
     end
 
     def test_should_log_if_no_file_is_found
-      expects_logging(:error, any_parameters)
-      source = YamlSource.new('no_such_file.yml', 'test')
+      expects_logging(:warn, any_parameters)
+      YamlSource.new('no_such_file.yml', 'test')
     end
 
     def test_should_log_if_environment_is_not_present
-      expects_logging(:error, any_parameters)
-      source = YamlSource.new(@test_yml_path, 'nonsense')
+      expects_logging(:error, includes(@test_yml_path))
+      YamlSource.new(@test_yml_path, 'nonsense')
     end
 
     def test_should_not_fail_to_log_missing_file_during_startup
       without_logger do
-        ::NewRelic::Agent::StartupLogger.any_instance.expects(:error)
-        source = YamlSource.new('no_such_file.yml', 'test')
+        ::NewRelic::Agent::StartupLogger.any_instance.expects(:warn)
+        YamlSource.new('no_such_file.yml', 'test')
       end
     end
 
@@ -77,7 +85,7 @@ module NewRelic::Agent::Configuration
         File.stubs(:exists?).returns(true)
         File.stubs(:read).raises(StandardError.new("boo"))
 
-        source = YamlSource.new('fake.yml', 'test')
+        YamlSource.new('fake.yml', 'test')
       end
     end
 

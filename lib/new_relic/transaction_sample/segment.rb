@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'new_relic/transaction_sample'
 
 module NewRelic
@@ -8,13 +12,19 @@ module NewRelic
       # have a timestamp.
       attr_reader :exit_timestamp
       attr_reader :parent_segment
-      attr_reader :metric_name
+
+      # This is only used from developer mode and rpm_site.
+      # No new clients should be added.
       attr_reader :segment_id
 
-      def initialize(timestamp, metric_name, segment_id)
+      attr_accessor :metric_name
+
+      UNKNOWN_SEGMENT_NAME = '<unknown>'.freeze
+
+      def initialize(timestamp, metric_name, segment_id=nil)
         @entry_timestamp = timestamp
-        @metric_name = metric_name || '<unknown>'
-        @segment_id = segment_id || object_id
+        @metric_name     = metric_name || UNKNOWN_SEGMENT_NAME
+        @segment_id      = segment_id  || object_id
       end
 
       # sets the final timestamp on a segment to indicate the exit
@@ -43,13 +53,10 @@ module NewRelic
           [ (@called_segments ? @called_segments.map{|s| s.to_array} : []) ]
       end
 
-      def to_json
-        JSON.dump(self.to_array)
-      end
-
       def path_string
         "#{metric_name}[#{called_segments.collect {|segment| segment.path_string }.join('')}]"
       end
+
       def to_s_compact
         str = ""
         str << metric_name
@@ -58,6 +65,7 @@ module NewRelic
         end
         str
       end
+
       def to_debug_str(depth)
         tab = "  " * depth
         s = tab.clone
@@ -105,29 +113,6 @@ module NewRelic
         count
       end
 
-      # Walk through the tree and truncate the segments in a
-      # depth-first manner
-      def truncate(max)
-        return 1 unless @called_segments
-        total, self.called_segments = truncate_each_child(max - 1)
-        total+1
-      end
-
-      def truncate_each_child(max)
-        total = 0
-        accumulator = []
-        called_segments.each { | s |
-          if total == max
-            true
-          else
-            total += s.truncate(max - total)
-            accumulator << s
-          end
-        }
-        total
-        [total, accumulator]
-      end
-
       def []=(key, value)
         # only create a parameters field if a parameter is set; this will save
         # bandwidth etc as most segments have no parameters
@@ -140,6 +125,10 @@ module NewRelic
 
       def params
         @params ||= {}
+      end
+
+      def params=(p)
+        @params = p
       end
 
       # call the provided block for this segment and each
@@ -169,26 +158,30 @@ module NewRelic
         summary.current_nest_count -= 1 if summary
       end
 
+      # This is only for use by developer mode
       def find_segment(id)
-        return self if @segment_id == id
+        return self if segment_id == id
         called_segments.each do |segment|
           found = segment.find_segment(id)
           return found if found
         end
         nil
       end
-      
+
       def explain_sql
-        NewRelic::Agent::Database.explain_sql(params[:sql],
-                                              params[:connection_config])
+        return params[:explain_plan] if params.key?(:explain_plan)
+
+        statement = params[:sql]
+        return nil unless statement.respond_to?(:config) &&
+                          statement.respond_to?(:explainer)
+
+        NewRelic::Agent::Database.explain_sql(statement,
+                                              statement.config,
+                                              &statement.explainer)
       end
-      
+
       def obfuscated_sql
         NewRelic::Agent::Database.obfuscate_sql(params[:sql])
-      end
-      
-      def params=(p)
-        @params = p
       end
 
       def called_segments=(segments)

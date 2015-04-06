@@ -1,14 +1,17 @@
-# ENV['SKIP_RAILS'] = 'true'
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..', '..',
                                    'test_helper'))
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','..','ui',
                                    'helpers','developer_mode_helper.rb'))
 
 ENV['RACK_ENV'] = 'test'
-class DeveloperModeTest < Test::Unit::TestCase
+class DeveloperModeTest < Minitest::Test
   include NewRelic::DeveloperModeHelper
-  
-  
+
+
   def test_application_caller
     assert_equal "/opt/ruby/lib/ruby/1.8/net/protocol.rb:135:in `rbuf_fill'", application_caller(Fixtures::NORMAL_TRACE)
     assert_equal "c:/Ruby192/lib/ruby/1.9.1/erb.rb:753:in `eval'", application_caller(Fixtures::WINDOWS_TRACE)
@@ -19,16 +22,8 @@ class DeveloperModeTest < Test::Unit::TestCase
     assert_equal 29, trace.size
     trace = application_stack_trace(Fixtures::WINDOWS_TRACE)
     assert_equal 14, trace.size
-    
   end
-  
-  def test_url_for_source
-    for line in Fixtures::NORMAL_TRACE + Fixtures::WINDOWS_TRACE do
-      line = url_for_source(line)
-      assert line =~ /^show_source\?file=.*&amp;line=\d+&amp;/, line
-    end
-  end
-  
+
   private
   def params; {} end
   module Fixtures
@@ -101,9 +96,9 @@ rack (1.2.3) lib/rack/content_length.rb:13:in `call'
 rack (1.2.3) lib/rack/handler/webrick.rb:52:in `service'
 c:/Ruby192/lib/ruby/1.9.1/webrick/httpserver.rb:111:in `service'
 c:/Ruby192/lib/ruby/1.9.1/webrick/httpserver.rb:70:in `run'
-c:/Ruby192/lib/ruby/1.9.1/webrick/server.rb:183:in `block in start_thread'  
+c:/Ruby192/lib/ruby/1.9.1/webrick/server.rb:183:in `block in start_thread'
   EOF
-    
+
     NORMAL_TRACE = <<-EOF.split("\n")
 /opt/ruby/lib/ruby/1.8/net/protocol.rb:135:in `rbuf_fill'
 /opt/ruby/lib/ruby/1.8/timeout.rb:101:in `timeout'
@@ -137,5 +132,5 @@ c:/Ruby192/lib/ruby/1.9.1/webrick/server.rb:183:in `block in start_thread'
 /Users/joe/dev/workspace/config/initializers/delayed_job_with_shards.rb:17:in `perform'
 /opt/ruby/gems/delayed_job-2.0.6/lib/delayed/backend/base.rb:74:in `invoke_job'
   EOF
-  end  
+  end
 end

@@ -1,22 +1,17 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 # RUBY-981 Audit Log
 
 require 'newrelic_rpm'
-require 'fake_collector'
-require 'mocha'
 
-class AuditLogTest < Test::Unit::TestCase
-  # Initialization
+class AuditLogTest < Minitest::Test
+  include MultiverseHelpers
+
   def setup
-    $collector ||= NewRelic::FakeCollector.new
-    $collector.reset
-    $collector.run
-
     @string_log = StringIO.new
     NewRelic::Agent::AuditLogger.any_instance.stubs(:ensure_log_path).returns(@string_log)
-  end
-
-  def teardown
-    $collector.reset
   end
 
   def audit_log_contents
@@ -27,73 +22,37 @@ class AuditLogTest < Test::Unit::TestCase
     @contents
   end
 
-  def assert_audit_log_contains(needle)
-    # Original request bodies dumped to the log have symbol keys, but once
-    # they go through a dump/load, they're strings again, so we strip
-    # double-quotes and colons from the log, and the strings we searching for.
-    regex = /[:"]/
-    needle = needle.gsub(regex, '')
-    haystack = audit_log_contents.gsub(regex, '')
-    assert(haystack.include?(needle), "Expected log to contain '#{needle}'")
+  def test_logs_nothing_by_default
+    run_agent do
+      perform_actions
+      assert_equal('', audit_log_contents)
+    end
   end
 
-  # Because we don't generate a strictly machine-readable representation of
-  # request bodies for the audit log, the transformation into strings is
-  # effectively one-way. This, combined with the fact that Hash traversal order
-  # is arbitrary in Ruby 1.8.x means that it's difficult to directly assert that
-  # some object graph made it into the audit log (due to different possible 
-  # orderings of the key/value pairs in Hashes that were embedded in the request
-  # body). So, this method traverses an object graph and only makes assertions
-  # about the terminal (non-Array-or-Hash) nodes therein.
-  def assert_audit_log_contains_object(o, format)
-    if format == :json
-      assert_audit_log_contains(JSON.dump(o))
-    else
-      case o
-      when Hash
-        o.each do |k,v|
-          assert_audit_log_contains_object(v, format)
-        end
-      when Array
-        o.each do |el|
-          assert_audit_log_contains_object(el, format)
-        end
-      else
-        assert_audit_log_contains(o.inspect)
+  def test_logs_nothing_when_disabled
+    run_agent(:'audit_log.enabled' => false) do
+      perform_actions
+      assert_equal('', audit_log_contents)
+    end
+  end
+
+  def test_logs_request_bodies_human_readably_ish
+    run_agent(:'audit_log.enabled' => true) do
+      perform_actions
+      format = NewRelic::Agent::NewRelicService::JsonMarshaller.is_supported? ? :json : :pruby
+      $collector.agent_data.each do |req|
+        assert_audit_log_contains_object(audit_log_contents, req.body, format)
       end
     end
   end
 
-  def run_agent_with_options(options)
-    NewRelic::Agent.manual_start(options)
-    yield NewRelic::Agent.agent if block_given?
-    NewRelic::Agent.shutdown    
-  end
-
-  def test_logs_nothing_by_default
-    run_agent_with_options({})
-    assert_equal('', audit_log_contents)
-  end
-
-  def test_logs_nothing_when_disabled
-    run_agent_with_options({ :'audit_log.enabled' => false })
-    assert_equal('', audit_log_contents)
-  end
-
-  def test_logs_request_bodies_human_readably_ish
-    format = NewRelic::Agent::NewRelicService::JsonMarshaller.is_supported? ? :json : :pruby
-    run_agent_with_options({ :'audit_log.enabled' => true }) do |agent|
-      agent.sql_sampler.notice_first_scope_push(nil)
-      agent.sql_sampler.notice_sql("select * from test",
-                                    "Database/test/select",
-                                    nil, 1.5)
-      agent.sql_sampler.notice_scope_empty
-      agent.send(:harvest_and_send_slowest_sql)
-    end
-
-    $collector.agent_data.each do |req|
-      body = $collector.unpack_inner_blobs(req)
-      assert_audit_log_contains_object(body, format)
-    end
+  def perform_actions
+    state = NewRelic::Agent::TransactionState.tl_get
+    NewRelic::Agent.instance.sql_sampler.on_start_transaction(state, nil)
+    NewRelic::Agent.instance.sql_sampler.notice_sql("select * from test",
+                                 "Database/test/select",
+                                 nil, 1.5, state)
+    NewRelic::Agent.instance.sql_sampler.on_finishing_transaction(state, 'txn')
+    NewRelic::Agent.instance.send(:harvest_and_send_slowest_sql)
   end
 end

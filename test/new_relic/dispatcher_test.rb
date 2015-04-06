@@ -1,19 +1,24 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..', 'test_helper'))
 
 # Test logic around detecting or configuring dispatcher
-class DispatcherTest < Test::Unit::TestCase
+class DispatcherTest < Minitest::Test
 
   def setup
     NewRelic::Agent.shutdown
     NewRelic::Agent.reset_config
   end
 
+  def teardown
+    NewRelic::Agent.reset_config
+    NewRelic::Control.reset
+  end
+
   def assert_dispatcher_reported_to_environment_report(dispatcher)
-    NewRelic::Control.instance.local_env.gather_environment_info
-    key, value = NewRelic::Control.instance.local_env.snapshot.detect do |(k, v)|
-      k == "Dispatcher"
-    end
-    assert_equal dispatcher.to_s, value
+    assert_equal dispatcher.to_s, NewRelic::EnvironmentReport.new["Dispatcher"]
   end
 
   def test_detects_dispatcher_via_loaded_libraries

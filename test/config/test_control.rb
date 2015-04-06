@@ -1,9 +1,13 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'new_relic/control/frameworks/rails'
 require 'new_relic/control/frameworks/rails3'
 require 'new_relic/control/frameworks/rails4'
 
-if defined?(::Rails) && ::Rails.respond_to?(:version)
-  parent_class = case ::Rails.version.to_i
+if defined?(::Rails)
+  parent_class = case ::Rails::VERSION::MAJOR.to_i
   when 4
     NewRelic::Control::Frameworks::Rails4
   when 3
@@ -18,7 +22,7 @@ class NewRelic::Control::Frameworks::Test < parent_class
   end
 
   def app
-    if defined?(::Rails::VERSION)
+    if defined?(::Rails) && defined?(::Rails::VERSION)
       if ::Rails::VERSION::MAJOR.to_i == 4
         :rails4
       elsif ::Rails::VERSION::MAJOR.to_i == 3
@@ -26,6 +30,8 @@ class NewRelic::Control::Frameworks::Test < parent_class
       else
         :rails
       end
+    else
+      :test
     end
   end
 

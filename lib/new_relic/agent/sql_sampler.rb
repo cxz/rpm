@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'zlib'
 require 'base64'
 require 'digest/md5'
@@ -7,14 +11,27 @@ require 'new_relic/control'
 
 module NewRelic
   module Agent
-
+    # This class contains the logic of recording slow SQL traces, which may
+    # represent multiple aggregated SQL queries.
+    #
+    # A slow SQL trace consists of a collection of SQL instrumented SQL queries
+    # that all normalize to the same text. For example, the following two
+    # queries would be aggregated together into a single slow SQL trace:
+    #
+    #   SELECT * FROM table WHERE id=42
+    #   SELECT * FROM table WHERE id=1234
+    #
+    # Each slow SQL trace keeps track of the number of times the same normalized
+    # query was seen, the min, max, and total time spent executing those
+    # queries, and an example backtrace from one of the aggregated queries.
+    #
+    # @api public
     class SqlSampler
 
       # Module defining methods stubbed out when the agent is disabled
-      module Shim #:nodoc:
-        def notice_scope_empty(*args); end
-        def notice_first_scope_push(*args); end
-        def notice_transaction(*args); end
+      module Shim
+        def on_start_transaction(*args); end
+        def on_finishing_transaction(*args); end
       end
 
       attr_reader :disabled
@@ -22,11 +39,12 @@ module NewRelic
       # this is for unit tests only
       attr_reader :sql_traces
 
+      MAX_SAMPLES = 10
+
       def initialize
         @sql_traces = {}
-        clear_transaction_data
 
-        # This lock is used to synchronize access to the @last_sample
+        # This lock is used to synchronize access to @sql_traces
         # and related variables. It can become necessary on JRuby or
         # any 'honest-to-god'-multithreaded system
         @samples_lock = Mutex.new
@@ -34,105 +52,153 @@ module NewRelic
 
       def enabled?
         Agent.config[:'slow_sql.enabled'] &&
-          (Agent.config[:'slow_sql.record_sql'] == 'raw' ||
-           Agent.config[:'slow_sql.record_sql'] == 'obfuscated') &&
-          Agent.config[:'transaction_tracer.enabled']
+          Agent.config[:'transaction_tracer.enabled'] &&
+          NewRelic::Agent::Database.should_record_sql?(:slow_sql)
       end
 
-      def notice_transaction(path, uri=nil, params={})
-        if NewRelic::Agent.instance.transaction_sampler.builder
-          guid = NewRelic::Agent.instance.transaction_sampler.builder.sample.guid
+      def on_start_transaction(state, start_time, uri=nil)
+        return unless enabled?
+
+        state.sql_sampler_transaction_data = TransactionSqlData.new
+
+        if state.transaction_sample_builder
+          guid = state.transaction_sample_builder.sample.guid
         end
-        if Agent.config[:'slow_sql.enabled'] && transaction_data
-          transaction_data.set_transaction_info(path, uri, params, guid)
+
+        if Agent.config[:'slow_sql.enabled'] && state.sql_sampler_transaction_data
+          state.sql_sampler_transaction_data.set_transaction_info(uri, guid)
         end
       end
 
-      def notice_first_scope_push(time)
-        create_transaction_data
-      end
-
-      def create_transaction_data
-        Thread.current[:new_relic_sql_data] = TransactionSqlData.new
-      end
-
-      def transaction_data
-        Thread.current[:new_relic_sql_data]
-      end
-
-      def clear_transaction_data
-        Thread.current[:new_relic_sql_data] = nil
+      def tl_transaction_data # only used for testing
+        TransactionState.tl_get.sql_sampler_transaction_data
       end
 
       # This is called when we are done with the transaction.
-      def notice_scope_empty(time=Time.now)
-        data = transaction_data
-        clear_transaction_data
+      def on_finishing_transaction(state, name, time=Time.now)
+        return unless enabled?
 
+        data = state.sql_sampler_transaction_data
+        return unless data
+
+        data.set_transaction_name(name)
         if data.sql_data.size > 0
           @samples_lock.synchronize do
-            ::NewRelic::Agent.logger.debug "Harvesting #{data.sql_data.size} slow transaction sql statement(s)"
-            #FIXME get tx name and uri
-            harvest_slow_sql data
+            ::NewRelic::Agent.logger.debug "Examining #{data.sql_data.size} slow transaction sql statement(s)"
+            save_slow_sql data
           end
         end
       end
 
       # this should always be called under the @samples_lock
-      def harvest_slow_sql(transaction_sql_data)
+      def save_slow_sql(transaction_sql_data)
+        path = transaction_sql_data.path
+        uri  = transaction_sql_data.uri
+
         transaction_sql_data.sql_data.each do |sql_item|
           normalized_sql = sql_item.normalize
           sql_trace = @sql_traces[normalized_sql]
           if sql_trace
-            sql_trace.aggregate(sql_item, transaction_sql_data.path,
-                                transaction_sql_data.uri)
+            sql_trace.aggregate(sql_item, path, uri)
           else
-            @sql_traces[normalized_sql] = SqlTrace.new(normalized_sql,
-                sql_item, transaction_sql_data.path, transaction_sql_data.uri)
+            if has_room?
+              sql_trace = SqlTrace.new(normalized_sql, sql_item, path, uri)
+            elsif should_add_trace?(sql_item)
+              remove_shortest_trace
+              sql_trace = SqlTrace.new(normalized_sql, sql_item, path, uri)
+            end
+
+            if sql_trace
+              @sql_traces[normalized_sql] = sql_trace
+            end
           end
         end
-
       end
 
-      def notice_sql(sql, metric_name, config, duration)
-        return unless transaction_data
-        if NewRelic::Agent.is_sql_recorded?
+      # this should always be called under the @samples_lock
+      def should_add_trace?(sql_item)
+        @sql_traces.any? do |(_, existing_trace)|
+          existing_trace.max_call_time < sql_item.duration
+        end
+      end
+
+      # this should always be called under the @samples_lock
+      def has_room?
+        @sql_traces.size < MAX_SAMPLES
+      end
+
+      # this should always be called under the @samples_lock
+      def remove_shortest_trace
+        shortest_key, _ = @sql_traces.min_by { |(_, trace)| trace.max_call_time }
+        @sql_traces.delete(shortest_key)
+      end
+
+      # Records an SQL query, potentially creating a new slow SQL trace, or
+      # aggregating the query into an existing slow SQL trace.
+      #
+      # This method should be used only by gem authors wishing to extend
+      # the Ruby agent to instrument new database interfaces - it should
+      # generally not be called directly from application code.
+      #
+      # @param sql [String] the SQL query being recorded
+      # @param metric_name [String] is the metric name under which this query will be recorded
+      # @param config [Object] is the driver configuration for the connection
+      # @param duration [Float] number of seconds the query took to execute
+      # @param explainer [Proc] for internal use only - 3rd-party clients must
+      #                         not pass this parameter.
+      #
+      # @api public
+      #
+      def notice_sql(sql, metric_name, config, duration, state=nil, &explainer) #THREAD_LOCAL_ACCESS sometimes
+        state ||= TransactionState.tl_get
+        data = state.sql_sampler_transaction_data
+        return unless data
+
+        if state.is_sql_recorded?
           if duration > Agent.config[:'slow_sql.explain_threshold']
             backtrace = caller.join("\n")
-            transaction_data.sql_data << SlowSql.new(sql, metric_name, config,
-                                                     duration, backtrace)
+            data.sql_data << SlowSql.new(Database.capture_query(sql),
+                                         metric_name, config,
+                                         duration, backtrace, &explainer)
           end
         end
       end
 
-      def merge(sql_traces)
+      def merge!(sql_traces)
         @samples_lock.synchronize do
-#FIXME we need to merge the sql_traces array back into the @sql_traces hash
-#          @sql_traces.merge! sql_traces
+          sql_traces.each do |trace|
+            existing_trace = @sql_traces[trace.sql]
+            if existing_trace
+              existing_trace.aggregate_trace(trace)
+            else
+              @sql_traces[trace.sql] = trace
+            end
+          end
         end
       end
 
-      def harvest
-        return [] if !Agent.config[:'slow_sql.enabled']
-        result = []
+      def harvest!
+        return [] unless enabled?
+
+        slowest = []
         @samples_lock.synchronize do
-          result = @sql_traces.values
+          slowest = @sql_traces.values
           @sql_traces = {}
         end
-        slowest = result.sort{|a,b| b.max_call_time <=> a.max_call_time}[0,10]
         slowest.each {|trace| trace.prepare_to_send }
         slowest
       end
 
-      # reset samples without rebooting the web server
       def reset!
+        @samples_lock.synchronize do
+          @sql_traces = {}
+        end
       end
     end
 
     class TransactionSqlData
       attr_reader :path
       attr_reader :uri
-      attr_reader :params
       attr_reader :sql_data
       attr_reader :guid
 
@@ -140,11 +206,13 @@ module NewRelic
         @sql_data = []
       end
 
-      def set_transaction_info(path, uri, params, guid)
-        @path = path
+      def set_transaction_info(uri, guid)
         @uri = uri
-        @params = params
         @guid = guid
+      end
+
+      def set_transaction_name(name)
+        @path = name
       end
     end
 
@@ -154,12 +222,14 @@ module NewRelic
       attr_reader :duration
       attr_reader :backtrace
 
-      def initialize(sql, metric_name, config, duration, backtrace = nil)
+      def initialize(sql, metric_name, config, duration, backtrace=nil,
+                     &explainer)
         @sql = sql
         @metric_name = metric_name
         @config = config
         @duration = duration
         @backtrace = backtrace
+        @explainer = explainer
       end
 
       def obfuscate
@@ -172,21 +242,29 @@ module NewRelic
       end
 
       def explain
-        NewRelic::Agent::Database.explain_sql(@sql, @config)
+        if @config && @explainer
+          NewRelic::Agent::Database.explain_sql(@sql, @config, &@explainer)
+        end
+      end
+
+      # We can't serialize the explainer, so clear it before we transmit
+      def prepare_to_send
+        @explainer = nil
       end
     end
 
-    class SqlTrace < MethodTraceStats
+    class SqlTrace < Stats
       attr_reader :path
       attr_reader :url
       attr_reader :sql_id
       attr_reader :sql
       attr_reader :database_metric_name
       attr_reader :params
+      attr_reader :slow_sql
 
       def initialize(normalized_query, slow_sql, path, uri)
         super()
-        @params = {} #FIXME
+        @params = {}
         @sql_id = consistent_hash(normalized_query)
         set_primary slow_sql, path, uri
         record_data_point(float(slow_sql.duration))
@@ -198,7 +276,6 @@ module NewRelic
         @database_metric_name = slow_sql.metric_name
         @path = path
         @url = uri
-        # FIXME
         @params[:backtrace] = slow_sql.backtrace if slow_sql.backtrace
       end
 
@@ -210,9 +287,14 @@ module NewRelic
         record_data_point(float(slow_sql.duration))
       end
 
+      def aggregate_trace(trace)
+        aggregate(trace.slow_sql, trace.path, trace.url)
+      end
+
       def prepare_to_send
         params[:explain_plan] = @slow_sql.explain if need_to_explain?
         @sql = @slow_sql.obfuscate if need_to_obfuscate?
+        @slow_sql.prepare_to_send
       end
 
       def need_to_obfuscate?

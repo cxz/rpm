@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic::Agent
   # Basic mechanism for the agent instance to provide agent-wide eventing.
   # It is intended to keep different pieces of the app decoupled from each other.
@@ -24,6 +28,10 @@ module NewRelic::Agent
       NewRelic::Agent.logger.debug("Run-away event subscription on #{event}? Subscribed #{count}") if count > @runaway_threshold
     end
 
+    def clear
+      @events.clear
+    end
+
     def notify(event, *args)
       return unless @events.has_key?(event)
 
@@ -31,7 +39,7 @@ module NewRelic::Agent
         begin
           handler.call(*args)
         rescue => err
-          NewRelic::Agent.logger.debug("Failure during notify for #{@event}", err)
+          NewRelic::Agent.logger.debug("Failure during notify for #{event}", err)
         end
       end
     end

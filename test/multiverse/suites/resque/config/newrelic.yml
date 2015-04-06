@@ -1,7 +1,6 @@
 ---
 development:
   error_collector:
-    capture_source: true
     enabled: true
   apdex_t: 0.5
   ssl: false
@@ -10,13 +9,11 @@ development:
   developer_mode: false
   app_name: test
   host: 127.0.0.1
+  port: <%= $collector && $collector.port %>
   api_host: 127.0.0.1
-  port: <%= ENV['NEWRELIC_MULTIVERSE_FAKE_COLLECTOR_PORT'] %>
   transaction_tracer:
     record_sql: obfuscated
     enabled: true
     stack_trace_threshold: 0.5
     transaction_threshold: 1.0
   capture_params: false
-  log_level: debug
-  log_file_path: agent.log

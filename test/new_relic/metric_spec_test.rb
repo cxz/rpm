@@ -1,5 +1,9 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..', 'test_helper'))
-class NewRelic::MetricSpecTest < Test::Unit::TestCase
+class NewRelic::MetricSpecTest < Minitest::Test
 
   def test_equal
     spec1 = NewRelic::MetricSpec.new('Controller')
@@ -39,36 +43,82 @@ class NewRelic::MetricSpecTest < Test::Unit::TestCase
   end
 
   # test to make sure the MetricSpec class can serialize to json
-  def test_json
-    spec = NewRelic::MetricSpec.new("controller", "metric#find")
+  if defined?(::ActiveSupport)
+    def test_json
+      spec = NewRelic::MetricSpec.new("controller", "metric#find")
 
-    import = ::ActiveSupport::JSON.decode(spec.to_json)
+      import = ::ActiveSupport::JSON.decode(spec.to_json)
 
-    compare_spec(spec, import)
+      compare_spec(spec, import)
 
-    stats = NewRelic::MethodTraceStats.new
+      stats = NewRelic::Agent::Stats.new
 
-    import = ::ActiveSupport::JSON.decode(stats.to_json)
+      import = ::ActiveSupport::JSON.decode(stats.to_json)
 
-    compare_stat(stats, import)
+      compare_stat(stats, import)
 
-    metric_data = NewRelic::MetricData.new(spec, stats, 10)
+      metric_data = NewRelic::MetricData.new(spec, stats, 10)
 
-    import = ::ActiveSupport::JSON.decode(metric_data.to_json)
+      import = ::ActiveSupport::JSON.decode(metric_data.to_json)
 
-    compare_metric_data(metric_data, import)
+      compare_metric_data(metric_data, import)
+    end
+  else
+    puts "Skipping tests in #{__FILE__} because ActiveSupport is unavailable"
   end
 
-  def test_truncate!
-    spec = NewRelic::MetricSpec.new('a', 'b')
-    spec.name = "a" * 300
-    spec.scope = "b" * 300
-    spec.truncate!
+  def test_initialize_truncates_name_and_scope
+    long_name = "a" * 300
+    long_scope = "b" * 300
+    spec = NewRelic::MetricSpec.new(long_name, long_scope)
     assert_equal("a" * 255, spec.name, "should have shortened the name")
     assert_equal("b" * 255, spec.scope, "should have shortened the scope")
   end
 
+  # These next three tests are here only because rpm_site uses our MetricSpec
+  # class in silly ways (specifically, it passes in non-String values for
+  # name/scope). If we can get rid of those silly usages, we can remove these
+  # tests.
+
+  def test_initialize_can_take_a_nil_name
+    spec = NewRelic::MetricSpec.new(nil)
+
+    assert_equal('', spec.name)
+    assert_equal('', spec.scope)
+  end
+
+  def test_initialize_can_take_a_non_string_name
+    name  = string_wrapper_class.new("name")
+
+    spec = NewRelic::MetricSpec.new(name)
+
+    assert_equal('name',  spec.name)
+    assert_equal('',      spec.scope)
+  end
+
+  def test_initialize_can_take_a_non_string_scope
+    name  = "name"
+    scope = string_wrapper_class.new("scope")
+
+    spec = NewRelic::MetricSpec.new(name, scope)
+
+    assert_equal('name',  spec.name)
+    assert_equal('scope', spec.scope)
+  end
+
   private
+
+  def string_wrapper_class
+    Class.new do
+      def initialize(value)
+        @value = value
+      end
+
+      def to_s
+        @value
+      end
+    end
+  end
 
   def compare_spec(spec, import)
     assert_equal 2, import.length

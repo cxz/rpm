@@ -1,9 +1,14 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..', '..', '..','test_helper'))
 require 'new_relic/agent/agent'
 require 'ostruct'
 
-class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
+class NewRelic::Agent::Agent::ConnectTest < Minitest::Test
   include NewRelic::Agent::Agent::Connect
+  include TransactionSampleTestHelper
 
   def setup
     @connected = nil
@@ -13,13 +18,19 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
     @transaction_sampler = NewRelic::Agent::TransactionSampler.new
     @sql_sampler = NewRelic::Agent::SqlSampler.new
     @error_collector = NewRelic::Agent::ErrorCollector.new
+    @stats_engine = NewRelic::Agent::StatsEngine.new
     server = NewRelic::Control::Server.new('localhost', 30303)
     @service = NewRelic::Agent::NewRelicService.new('abcdef', server)
+    NewRelic::Agent.instance.service = @service
+    @local_host = nil
+
     @test_config = { :developer_mode => true }
-    NewRelic::Agent.config.apply_config(@test_config)
+    NewRelic::Agent.reset_config
+    NewRelic::Agent.config.add_config_for_testing(@test_config)
   end
 
   def teardown
+    NewRelic::Agent.reset_config
     NewRelic::Agent.config.remove_config(@test_config)
   end
 
@@ -31,6 +42,10 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
       end
     end
     fake_control
+  end
+
+  def local_host
+    @local_host
   end
 
   def test_should_connect_if_pending
@@ -65,7 +80,7 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
   def test_log_error
     error = StandardError.new("message")
 
-    expects_logging(:error, 
+    expects_logging(:error,
       includes("Error establishing connection with New Relic Service"), \
       instance_of(StandardError))
 
@@ -78,39 +93,31 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
     handle_license_error(error)
   end
 
-  def test_environment_for_connect_positive
-    fake_env = stub('local_env', :discovered_dispatcher => nil)
-    fake_env.expects(:snapshot).returns("snapshot")
-    NewRelic::Control.instance.expects(:local_env).at_least_once.returns(fake_env)
-    with_config(:send_environment_info => true) do
-      assert_equal 'snapshot', environment_for_connect
-    end
+  def test_connect_settings_have_environment_report
+    NewRelic::Agent.agent.generate_environment_report
+    assert NewRelic::Agent.agent.connect_settings[:environment].detect{ |(k, _)|
+      k == 'Gems'
+    }, "expected connect_settings to include gems from environment"
   end
 
   def test_environment_for_connect_negative
     with_config(:send_environment_info => false) do
-      assert_equal [], environment_for_connect
+      NewRelic::Agent.agent.generate_environment_report
+      assert_equal [], NewRelic::Agent.agent.connect_settings[:environment]
     end
   end
 
   def test_connect_settings
-    control = mocked_control
-    NewRelic::Agent.config.expects(:app_names)
-    self.expects(:environment_for_connect)
-    keys = %w(pid host app_name language agent_version environment settings)
-    value = connect_settings
+    NewRelic::Agent.config.expects(:app_names).returns(["apps"])
+    @local_host = "lo-calhost"
+    @environment_report = {}
+
+    keys = %w(pid host app_name language agent_version environment settings).map(&:to_sym)
+
+    settings = connect_settings
     keys.each do |k|
-      assert(value.has_key?(k.to_sym), "should include the key #{k}")
-    end
-  end
-
-  def test_configure_transaction_tracer_with_random_sampling
-    with_config(:'transaction_tracer.transaction_threshold' => 5,
-                :'transaction_tracer.random_sample' => true) do
-      sample = TransactionSampleTestHelper.make_sql_transaction
-      @transaction_sampler.store_sample(sample)
-
-      assert_equal sample, @transaction_sampler.instance_variable_get(:@random_sample)
+      assert_includes(settings.keys, k)
+      refute_nil(settings[k], "expected a value for #{k}")
     end
   end
 
@@ -142,36 +149,31 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
 
   def test_set_sql_recording_default
     with_config(:'transaction_tracer.record_sql' => 'obfuscated') do
-      assert_equal(:obfuscated, NewRelic::Agent::Database.record_sql_method,
-                   "should default to :obfuscated, was #{NewRelic::Agent::Database.record_sql_method}")
+      assert_equal(:obfuscated, NewRelic::Agent::Database.record_sql_method)
     end
   end
 
   def test_set_sql_recording_off
     with_config(:'transaction_tracer.record_sql' => 'off') do
-      assert_equal(:off, NewRelic::Agent::Database.record_sql_method,
-                   "should be set to :off, was #{NewRelic::Agent::Database.record_sql_method}")
+      assert_equal(:off, NewRelic::Agent::Database.record_sql_method)
     end
   end
 
   def test_set_sql_recording_none
     with_config(:'transaction_tracer.record_sql' => 'none') do
-      assert_equal(:off, NewRelic::Agent::Database.record_sql_method,
-                   "should be set to :off, was #{NewRelic::Agent::Database.record_sql_method}")
+      assert_equal(:off, NewRelic::Agent::Database.record_sql_method)
     end
   end
 
   def test_set_sql_recording_raw
     with_config(:'transaction_tracer.record_sql' => 'raw') do
-      assert_equal(:raw, NewRelic::Agent::Database.record_sql_method,
-                   "should be set to :raw, was #{NewRelic::Agent::Database.record_sql_method}")
+      assert_equal(:raw, NewRelic::Agent::Database.record_sql_method)
     end
   end
 
   def test_set_sql_recording_falsy
     with_config(:'transaction_tracer.record_sql' => false) do
-      assert_equal(:off, NewRelic::Agent::Database.record_sql_method,
-                   "should be set to :off, was #{NewRelic::Agent::Database.record_sql_method}")
+      assert_equal(:off, NewRelic::Agent::Database.record_sql_method)
     end
   end
 
@@ -181,9 +183,9 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
     query_server_for_configuration
   end
 
-  def test_connect_to_server_gets_config_from_collector
+  def test_connect_gets_config
     NewRelic::Agent.manual_start
-    NewRelic::Agent::Agent.instance.service = default_service(
+    NewRelic::Agent.instance.service = default_service(
       :connect => {'agent_run_id' => 23, 'config' => 'a lot'})
 
     response = NewRelic::Agent.agent.connect_to_server
@@ -192,6 +194,50 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
     assert_equal 'a lot', response['config']
 
     NewRelic::Agent.shutdown
+  end
+
+  def test_finish_setup_saves_transaction_name_rules
+    NewRelic::Agent.instance.instance_variable_set(:@transaction_rules,
+                                            NewRelic::Agent::RulesEngine.new)
+    config = {
+      'transaction_name_rules' => [ { 'match_expression' => '88',
+                                      'replacement'      => '**' },
+                                    { 'match_expression' => 'xx',
+                                      'replacement'      => 'XX' } ]
+    }
+    NewRelic::Agent.instance.finish_setup(config)
+
+    rules = NewRelic::Agent.instance.transaction_rules
+    assert_equal 2, rules.size
+    assert(rules.find{|r| r.match_expression == /88/i && r.replacement == '**' },
+           "rule not found among #{rules}")
+    assert(rules.find{|r| r.match_expression == /xx/i && r.replacement == 'XX' },
+           "rule not found among #{rules}")
+  ensure
+    NewRelic::Agent.instance.instance_variable_set(:@transaction_rules,
+                                            NewRelic::Agent::RulesEngine.new)
+  end
+
+  def test_finish_setup_saves_metric_name_rules
+    NewRelic::Agent.instance.instance_variable_set(:@metric_rules,
+                                            NewRelic::Agent::RulesEngine.new)
+    config = {
+      'metric_name_rules' => [ { 'match_expression' => '77',
+                                 'replacement'      => '&&' },
+                               { 'match_expression' => 'yy',
+                                 'replacement'      => 'YY' }]
+    }
+    finish_setup(config)
+
+    rules = @stats_engine.metric_rules
+    assert_equal 2, rules.size
+    assert(rules.find{|r| r.match_expression == /77/i && r.replacement == '&&' },
+           "rule not found among #{rules}")
+    assert(rules.find{|r| r.match_expression == /yy/i && r.replacement == 'YY' },
+           "rule not found among #{rules}")
+  ensure
+    NewRelic::Agent.instance.instance_variable_set(:@metric_rules,
+                                            NewRelic::Agent::RulesEngine.new)
   end
 
   def test_finish_setup
@@ -213,10 +259,17 @@ class NewRelic::Agent::Agent::ConnectTest < Test::Unit::TestCase
     end
   end
 
+  def test_finish_setup_replaces_server_config
+    finish_setup(:boo => "boo")
+    finish_setup(:hoo => true)
+
+    assert NewRelic::Agent.config[:hoo]
+    assert_nil NewRelic::Agent.config[:boo]
+  end
 
   def test_logging_collector_messages
     NewRelic::Agent.manual_start
-    NewRelic::Agent::Agent.instance.service = default_service(
+    NewRelic::Agent.instance.service = default_service(
       :connect => {
         'messages' => [{ 'message' => 'beep boop', 'level' => 'INFO' },
                        { 'message' => 'ha cha cha', 'level' => 'WARN' }]

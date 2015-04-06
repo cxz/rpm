@@ -1,7 +1,10 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+#
 # A Sampler is used to capture meaningful metrics in a background thread
-# periodically.  They will either be invoked once a minute just before the
-# data is sent to the agent (default) or every 10 seconds, when #use_harvest_sampler?
-# returns false.
+# periodically.  They will be invoked about once a minute, each time the agent
+# sends data to New Relic's servers.
 #
 # Samplers can be added to New Relic by subclassing NewRelic::Agent::Sampler.
 # Instances are created when the agent is enabled and installed.  Subclasses
@@ -13,9 +16,16 @@ module NewRelic
       # Exception denotes a sampler is not available and it will not be registered.
       class Unsupported < StandardError;  end
 
-      attr_accessor :stats_engine
       attr_reader :id
       @sampler_classes = []
+
+      def self.named(new_name)
+        @name = new_name
+      end
+
+      def self.name
+        @name
+      end
 
       def self.inherited(subclass)
         @sampler_classes << subclass
@@ -26,25 +36,29 @@ module NewRelic
         true
       end
 
-      # Override to use the periodic sampler instead of running the sampler on the
-      # minute during harvests.
-      def self.use_harvest_sampler?
-        true
+      def self.enabled?
+        if @name
+          config_key = "disable_#{@name}_sampler"
+          !(Agent.config[config_key])
+        else
+          true
+        end
       end
 
       def self.sampler_classes
         @sampler_classes
       end
 
-      def initialize(id)
-        @id = id
+      # The ID passed in here is unused by our code, but is preserved in case
+      # we have clients who are defining their own subclasses of this class, and
+      # expecting to be able to call super with an ID.
+      def initialize(id=nil)
+        @id = id || self.class.name
       end
 
       def poll
         raise "Implement in the subclass"
       end
-
-
     end
   end
 end

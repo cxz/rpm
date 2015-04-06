@@ -4,35 +4,37 @@ New Relic is a performance management system, developed by
 New Relic, Inc (http://www.newrelic.com).  It provides you with deep
 information about the performance of your Rails or Ruby
 application as it runs in production. The New Relic Ruby Agent is
-dual-purposed as a either a Rails plugin or a Gem, hosted on
+dual-purposed as a either a Gem or a Rails plugin, hosted on
 [github](http://github.com/newrelic/rpm/tree/master).
 
 The New Relic Ruby Agent runs in one of two modes:
 
-#### Production Mode
-
+**Production Mode**
 Low overhead instrumentation that captures detailed information on
 your application running in production and transmits them to
 newrelic.com where you can monitor them in real time.
 
-#### Developer Mode
-
+**Developer Mode**
 A Rack middleware that maps `/newrelic` to an application for showing
 detailed performance metrics on a page by page basis.  Installed
 automatically in Rails applications.
 
 ## Supported Environments
 
-* Ruby 1.8.6, 1.8.7, REE, 1.9.x
+* Ruby 1.8.7, REE, 1.9.x, 2.0.x, 2.1.x, 2.2.x
 * JRuby 1.6 and 1.7
-* Rails 2.0 or later for Production Mode
+* Rubinius 2.x (Experimental support only)
+* Rails 2.1 or later for Production Mode
 * Rails 2.3 or later for Developer Mode
 * Sinatra
 * Rack
 
+An up to date list of Ruby versions and frameworks for the latest agent
+can be found on [our docs site](http://docs.newrelic.com/docs/ruby/supported-frameworks).
+
 Any Rack based framework should work but may not be tested.  Install
 the Ruby Agent as a gem and add the Developer Mode middleware if
-desired.  Report any problems to support@newrelic.com.
+desired.  Report any problems by visiting support.newrelic.com.
 
 You can also monitor non-web applications. Refer to the "Other
 Environments" section under "Getting Started".
@@ -49,11 +51,7 @@ and avoid breaking your code with future changes to the agent.
 
 ## Getting Started
 
-Install the Ruby Agent as a gem.
-
-    gem install newrelic_rpm
-
-Or add it to your project's Gemfile.
+Add the Ruby Agent to your project's Gemfile.
 
     gem 'newrelic_rpm'
 
@@ -69,7 +67,7 @@ The initial configuration is done in the `newrelic.yml` file.  This file
 is by default read from the `config` directory of the application root
 and is subsequently searched for in the application root directory,
 and then in a `~/.newrelic` directory.  Once you're up and running you can
-enable Server Side Config and manage your newrelic configuation from the web
+enable Server Side Config and manage your newrelic configuration from the web
 UI.
 
 #### Rails Installation
@@ -113,8 +111,8 @@ to your startup sequence and then manually start the agent using
 
     NewRelic::Agent.manual_start
 
-To instrument Rack based applications, refer to the docs in
-`NewRelic::Agent::Instrumentation::Rack`.
+For information about instrumenting pure Rack applications, see our
+[Rack middlewares documentation](http://docs.newrelic.com/docs/ruby/rack-middlewares).
 
 Refer to the [New Relic's Docs](http://newrelic.com/docs) for details on how to
 monitor other web frameworks, background jobs, and daemons.
@@ -122,7 +120,7 @@ monitor other web frameworks, background jobs, and daemons.
 The Ruby Agent provides an API that allows custom instrumentation of additional
 frameworks.  You can find a list of community created intrumentation plugins
 (e.g. [newrelic-redis](https://github.com/evanphx/newrelic-redis)) in the
-[RPM Contrib README](https://github.com/newrelic/rpm_contrib/blob/master/README.md#new-relic-ruby-agent-plugins-seperate-projects).
+[extends_newrelic_rpm project](https://github.com/newrelic/extends_newrelic_rpm).
 
 ## Developer Mode
 
@@ -173,20 +171,27 @@ analysis. To view this data, log in to http://rpm.newrelic.com.
 NOTE: You must have a valid account and license key to view this data
 online.  Refer to instructions in *Getting Started*.
 
+## Recording Deploys
+
+The Ruby Agent supports recording deployments in New Relic via a command line
+tool or Capistrano recipes. For more information on these features see
+[our deployment documentation](http://docs.newrelic.com/docs/ruby/recording-deployments-with-the-ruby-agent)
+for more information.
 
 ## Support
 
-Reach out to us--and to fellow users--at
-[support.newrelic.com](http://support.newrelic.com/).
-There you'll find documentation, FAQs, and forums where you can submit
-suggestions and discuss New Relic with staff and other users.
+You can find more detailed documentation [on our website](http://newrelic.com/docs),
+and specifically in the [Ruby category](http://newrelic.com/docs/ruby).
+
+If you can't find what you're looking for there, reach out to us on our [support
+site](http://support.newrelic.com/) or our [community forum](http://forum.newrelic.com)
+and we'll be happy to help you.
 
 Also available is community support on IRC: we generally use #newrelic
 on irc.freenode.net
 
-Find a bug?  E-mail support@newrelic.com, or post it to
-
-[support.newrelic.com](http://support.newrelic.com/).
+Find a bug? Contact us via [support.newrelic.com](http://support.newrelic.com/),
+or e-mail support @ newrelic.com.
 
 Thank you, and may your application scale to infinity plus one.
 

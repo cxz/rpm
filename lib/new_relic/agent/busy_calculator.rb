@@ -1,3 +1,9 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
+require 'new_relic/agent/transaction_state'
+
 module NewRelic
   module Agent
     # This module supports calculation of actual time spent processing requests over the course of
@@ -14,28 +20,30 @@ module NewRelic
 
       # For testability, add accessors:
       attr_reader :harvest_start, :accumulator
-      
+
       # sets up busy calculations based on the start and end of
       # transactions - used for a rough estimate of what percentage of
       # wall clock time is spent processing requests
-      def dispatcher_start(time)
-        Thread.current[:busy_entries] ||= 0
-        callers = Thread.current[:busy_entries] += 1
+      def dispatcher_start(time) #THREAD_LOCAL_ACCESS
+        state = TransactionState.tl_get
+        state.busy_entries ||= 0
+        callers = state.busy_entries += 1
         return if callers > 1
         @lock.synchronize do
           @entrypoint_stack.push time
         end
       end
-      
+
       # called when a transaction finishes, to add time to the
       # instance variable accumulator. this is harvested when we send
       # data to the server
-      def dispatcher_finish(end_time = nil)
+      def dispatcher_finish(end_time = nil) #THREAD_LOCAL_ACCESS
+        state = TransactionState.tl_get
         # If #dispatcher_start hasn't been called at least once, abort early
-        return unless Thread.current[:busy_entries]
+        return unless state.busy_entries
 
         end_time ||= time_now
-        callers = Thread.current[:busy_entries] -= 1
+        callers = state.busy_entries -= 1
 
         # Ignore nested calls
         return if callers > 0
@@ -48,7 +56,7 @@ module NewRelic
           end
         end
       end
-      
+
       # this returns the size of the entry point stack, which
       # determines how many transactions are running
       def busy_count
@@ -57,9 +65,9 @@ module NewRelic
 
       # Reset the state of the information accumulated by all threads,
       # but only reset the recursion counter for this thread.
-      def reset
+      def reset #THREAD_LOCAL_ACCESS
         @entrypoint_stack = []
-        Thread.current[:busy_entries] = 0
+        TransactionState.tl_get.busy_entries = 0
         @lock ||= Mutex.new
         @accumulator = 0
         @harvest_start = time_now
@@ -90,7 +98,9 @@ module NewRelic
 
         busy = busy / time_window
 
-        instance_busy_stats.record_data_point busy if Agent.config[:report_instance_busy]
+        if Agent.config[:report_instance_busy]
+          NewRelic::Agent.record_metric('Instance/Busy', busy)
+        end
         @harvest_start = t0
       end
 
@@ -99,11 +109,6 @@ module NewRelic
       # so we can stub Time.now only for the BusyCalculator in tests
       def time_now
         Time.now
-      end
-
-      def instance_busy_stats
-        # Late binding on the Instance/busy stats
-        NewRelic::Agent.agent.stats_engine.get_stats_no_scope 'Instance/Busy'
       end
 
       self.reset

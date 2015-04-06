@@ -1,3 +1,6 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
 class SinatraRouteTestApp < Sinatra::Base
   configure do
@@ -20,16 +23,16 @@ class SinatraRouteTestApp < Sinatra::Base
   end
 end
 
-class SinatraRoutesTest < Test::Unit::TestCase
+class SinatraRoutesTest < Minitest::Test
   include Rack::Test::Methods
   include ::NewRelic::Agent::Instrumentation::Sinatra
 
+  include MultiverseHelpers
+
+  setup_and_teardown_agent
+
   def app
     SinatraRouteTestApp
-  end
-
-  def setup
-    ::NewRelic::Agent.manual_start
   end
 
   # https://support.newrelic.com/tickets/24779

@@ -1,13 +1,15 @@
-# Run faster standalone
-ENV['SKIP_RAILS'] = 'true'
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','test_helper'))
-class NewRelic::Agent::BusyCalculatorTest < Test::Unit::TestCase
+class NewRelic::Agent::BusyCalculatorTest < Minitest::Test
   attr_reader :now
   def setup
     @now = Time.now.to_f
     NewRelic::Agent::BusyCalculator.reset
-    @instance_busy = NewRelic::MethodTraceStats.new
-    NewRelic::Agent::BusyCalculator.stubs(:instance_busy_stats).returns(@instance_busy)
+    NewRelic::Agent.agent.stats_engine.clear_stats
+    @instance_busy = NewRelic::Agent.agent.stats_engine.get_stats_no_scope('Instance/Busy')
   end
 
   def test_normal
@@ -64,6 +66,8 @@ class NewRelic::Agent::BusyCalculatorTest < Test::Unit::TestCase
     # Get busy for 8 - 2 seconds
     NewRelic::Agent::BusyCalculator.dispatcher_finish(now - 2.0)
     worker.join
+
+    NewRelic::Agent::BusyCalculator.stubs(:time_now).returns(now - 1.0)
     NewRelic::Agent::BusyCalculator.harvest_busy
 
     assert_equal 1, @instance_busy.call_count
@@ -87,10 +91,8 @@ class NewRelic::Agent::BusyCalculatorTest < Test::Unit::TestCase
   end
 
   def test_finishing_without_starting_doesnt_raise
-    Thread.current[:busy_entries] = nil
-    assert_nothing_raised do
-      NewRelic::Agent::BusyCalculator.dispatcher_finish
-    end
+    NewRelic::Agent::TransactionState.tl_clear_for_testing
+    NewRelic::Agent::BusyCalculator.dispatcher_finish
   end
 
 end

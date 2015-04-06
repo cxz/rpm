@@ -1,56 +1,22 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','..','test_helper'))
 
-class NewRelic::Agent::Instrumentation::MetricFrameTest < Test::Unit::TestCase
+class NewRelic::Agent::Instrumentation::MetricFrameTest < Minitest::Test
 
-  attr_reader :f
-  def setup
-    @f = NewRelic::Agent::Instrumentation::MetricFrame.new
-  end
+  # These tests are just here to make sure that we're maintaining the required
+  # old interface for folks. Real testing of the underlying functionality
+  # should go with the Transaction methods we invoke, not these tests.
 
-  def test_request_parsing__none
-    assert_nil f.uri
-    assert_nil f.referer
-  end
-  def test_request_parsing__path
-    request = stub(:path => '/path?hello=bob#none')
-    f.request = request
-    assert_equal "/path", f.uri
-  end
-  def test_request_parsing__fullpath
-    request = stub(:fullpath => '/path?hello=bob#none')
-    f.request = request
-    assert_equal "/path", f.uri
-  end
-  def test_request_parsing__referer
-    request = stub(:referer => 'https://www.yahoo.com:8080/path/hello?bob=none&foo=bar')
-    f.request = request
-    assert_nil f.uri
-    assert_equal "https://www.yahoo.com:8080/path/hello", f.referer
+  def test_recording_web_transaction
+    NewRelic::Agent::Transaction.expects(:recording_web_transaction?)
+    NewRelic::Agent::Instrumentation::MetricFrame.recording_web_transaction?
   end
 
-  def test_request_parsing__uri
-    request = stub(:uri => 'http://creature.com/path?hello=bob#none', :referer => '/path/hello?bob=none&foo=bar')
-    f.request = request
-    assert_equal "/path", f.uri
-    assert_equal "/path/hello", f.referer
-  end
-
-  def test_request_parsing__hostname_only
-    request = stub(:uri => 'http://creature.com')
-    f.request = request
-    assert_equal "/", f.uri
-    assert_nil f.referer
-  end
-  def test_request_parsing__slash
-    request = stub(:uri => 'http://creature.com/')
-    f.request = request
-    assert_equal "/", f.uri
-    assert_nil f.referer
-  end
-
-  def test_queue_time
-    f.apdex_start = 1000
-    f.start = 1500
-    assert_equal 500, f.queue_time
+  def test_abort_transaction
+    NewRelic::Agent::Transaction.expects(:abort_transaction!)
+    NewRelic::Agent::Instrumentation::MetricFrame.abort_transaction!
   end
 end

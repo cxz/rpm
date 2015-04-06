@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'new_relic/metric_parser'
 module NewRelic
   module MetricParser
@@ -61,7 +65,7 @@ module NewRelic
       end
       private
       def file_name(path)
-        label = path.gsub /\.html\.rhtml/, '.rhtml'
+        label = path.gsub(/\.html\.rhtml/, '.rhtml')
         label = segments[1] if label.empty?
         label
       end

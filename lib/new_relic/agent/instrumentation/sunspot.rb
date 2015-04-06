@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 DependencyDetection.defer do
   @name = :sunspot
 
@@ -8,7 +12,7 @@ DependencyDetection.defer do
   executes do
     ::NewRelic::Agent.logger.info 'Installing Rails Sunspot instrumentation'
   end
-  
+
   executes do
     ::Sunspot.module_eval do
       class << self

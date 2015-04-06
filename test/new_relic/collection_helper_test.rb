@@ -1,9 +1,12 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','test_helper'))
 require 'ostruct'
-require 'active_record_fixtures' if defined?(::ActiveRecord)
 
 require 'new_relic/collection_helper'
-class NewRelic::CollectionHelperTest < Test::Unit::TestCase
+class NewRelic::CollectionHelperTest < Minitest::Test
 
   def setup
     NewRelic::Agent.manual_start
@@ -46,7 +49,7 @@ class NewRelic::CollectionHelperTest < Test::Unit::TestCase
     assert_equal String, truncate(s, 2).class
   end
   def test_number
-    np = normalize_params({ 'one' => 1.0, 'two' => '2'})
+    normalize_params({ 'one' => 1.0, 'two' => '2'})
   end
   def test_nil
     np = normalize_params({ nil => 1.0, 'two' => nil})
@@ -79,7 +82,7 @@ class NewRelic::CollectionHelperTest < Test::Unit::TestCase
     custom_params = { :one => {:hash => { :a => :b}, :myenum => e }}
     nh = normalize_params(custom_params)
     myenum = nh[:one][:myenum]
-    assert_match /MyEnumerable/, myenum
+    assert_match(/MyEnumerable/, myenum)
   end
 
   def test_stringio
@@ -87,22 +90,22 @@ class NewRelic::CollectionHelperTest < Test::Unit::TestCase
     s = StringIO.new "start" + ("foo bar bat " * 1000)
     val = nil
     s.each { | entry | val = entry; break }
-    assert_match /^startfoo bar/, val
+    assert_match(/^startfoo bar/, val)
 
     # make sure stringios aren't affected by calling normalize_params:
     s = StringIO.new "start" + ("foo bar bat " * 1000)
-    v = normalize_params({ :foo => s.string })
+    normalize_params({ :foo => s.string })
     s.each { | entry | val = entry; break }
-    assert_match /^startfoo bar/, val
+    assert_match(/^startfoo bar/, val)
   end
   class MyEnumerable
     include Enumerable
-    
+
     def each
       yield "1"
     end
   end
-  
+
   def test_object
     assert_equal ["foo", '#<OpenStruct>'], normalize_params(['foo', OpenStruct.new('z'=>'q')])
   end
@@ -111,7 +114,7 @@ class NewRelic::CollectionHelperTest < Test::Unit::TestCase
     clean_trace = strip_nr_from_backtrace(mock_backtrace)
     assert_equal(0, clean_trace.grep(/newrelic_rpm/).size,
                  "should remove all instances of new relic from backtrace but got: #{clean_trace.join("\n")}")
-    assert_equal(0, clean_trace.grep(/trace/).size, 
+    assert_equal(0, clean_trace.grep(/trace/).size,
                      "should remove trace method tags from method names but got: #{clean_trace.join("\n")}")
     assert((clean_trace.grep(/find/).size >= 3),
                "should see at least three frames with 'find' in them: \n#{clean_trace.join("\n")}")
@@ -126,22 +129,22 @@ class NewRelic::CollectionHelperTest < Test::Unit::TestCase
                    "should not remove trace method tags from method names but got: #{clean_trace.join("\n")}")
     end
   end
-  
-  private 
+
+  private
   def mock_backtrace
     [
-   %q{/home/app/gems/activerecord-2.3.12/lib/active_record/base.rb:1620:in `find_one_without_trace'}, 
-   %q{/home/app/gems/activerecord-2.3.12/lib/active_record/base.rb:1620:in `find_one'}, 
-   %q{/home/app/gems/activerecord-2.3.12/lib/active_record/base.rb:1603:in `find_from_ids'}, 
-   %q{./test/new_relic/collection_helper_test.rb:112:in `test_strip_stackdump'}, 
-   %q{/home/app/gems/mocha-0.9.8/lib/mocha/integration/test_unit/ruby_version_186_and_above.rb:19:in `__send__'}, 
-   %q{/home/app/gems/mocha-0.9.8/lib/mocha/integration/test_unit/ruby_version_186_and_above.rb:19:in `run'}, 
-   %q{/home/app/test/unit/testsuite.rb:34:in `run'}, 
-   %q{/home/app/test/unit/testsuite.rb:33:in `each'}, 
-   %q{/home/app/test/unit/testsuite.rb:33:in `run'}, 
-   %q{/home/app/test/unit/testsuite.rb:34:in `run'}, 
-   %q{/home/app/test/unit/testsuite.rb:33:in `each'}, 
-   %q{/home/app/test/unit/testsuite.rb:33:in `run'}, 
+   %q{/home/app/gems/activerecord-2.3.12/lib/active_record/base.rb:1620:in `find_one_without_trace'},
+   %q{/home/app/gems/activerecord-2.3.12/lib/active_record/base.rb:1620:in `find_one'},
+   %q{/home/app/gems/activerecord-2.3.12/lib/active_record/base.rb:1603:in `find_from_ids'},
+   %q{./test/new_relic/collection_helper_test.rb:112:in `test_strip_stackdump'},
+   %q{/home/app/gems/mocha-0.9.8/lib/mocha/integration/test_unit/ruby_version_186_and_above.rb:19:in `__send__'},
+   %q{/home/app/gems/mocha-0.9.8/lib/mocha/integration/test_unit/ruby_version_186_and_above.rb:19:in `run'},
+   %q{/home/app/test/unit/testsuite.rb:34:in `run'},
+   %q{/home/app/test/unit/testsuite.rb:33:in `each'},
+   %q{/home/app/test/unit/testsuite.rb:33:in `run'},
+   %q{/home/app/test/unit/testsuite.rb:34:in `run'},
+   %q{/home/app/test/unit/testsuite.rb:33:in `each'},
+   %q{/home/app/test/unit/testsuite.rb:33:in `run'},
    %q{/home/app/test/unit/ui/testrunnermediator.rb:46:in `run_suite'}
    ]
   end

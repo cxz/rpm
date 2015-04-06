@@ -1,26 +1,58 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'rack'
 require 'rack/request'
 require 'rack/response'
 require 'rack/file'
-require 'new_relic/metric_parser/metric_parser'
+
+require 'conditional_vendored_metric_parser'
 require 'new_relic/collection_helper'
+require 'new_relic/metric_parser/metric_parser'
+require 'new_relic/rack/agent_middleware'
+require 'new_relic/agent/instrumentation/middleware_proxy'
+
+require 'new_relic/transaction_sample'
+require 'new_relic/transaction_analysis'
 
 module NewRelic
-  module Rack
-    class DeveloperMode
+  class TransactionSample
+    include TransactionAnalysis
+  end
 
-      VIEW_PATH = File.expand_path('../../../../ui/views/', __FILE__)
+  module Rack
+    # This middleware provides the 'developer mode' feature of newrelic_rpm,
+    # which allows you to see data about local web transactions in development
+    # mode immediately without needing to send this data to New Relic's servers.
+    #
+    # Enabling developer mode has serious performance and security impact, and
+    # thus you should never use this middleware in a production or non-local
+    # environment.
+    #
+    # This middleware should be automatically inserted in most contexts, but if
+    # automatic middleware insertion fails, you may manually insert it into your
+    # middleware chain.
+    #
+    # @api public
+    #
+    class DeveloperMode < AgentMiddleware
+
+      VIEW_PATH   = File.expand_path('../../../../ui/views/'  , __FILE__)
       HELPER_PATH = File.expand_path('../../../../ui/helpers/', __FILE__)
       require File.join(HELPER_PATH, 'developer_mode_helper.rb')
 
-
       include NewRelic::DeveloperModeHelper
 
-      def initialize(app)
-        @app = app
+      class << self
+        attr_writer :profiling_enabled
       end
 
-      def call(env)
+      def self.profiling_enabled?
+        @profiling_enabled
+      end
+
+      def traced_call(env)
         return @app.call(env) unless /^\/newrelic/ =~ ::Rack::Request.new(env).path_info
         dup._call(env)
       end
@@ -28,6 +60,8 @@ module NewRelic
       protected
 
       def _call(env)
+        NewRelic::Agent.ignore_transaction
+
         @req = ::Rack::Request.new(env)
         @rendered = false
         case @req.path_info
@@ -49,8 +83,6 @@ module NewRelic
           show_sample_data
         when /explain_sql/
           explain_sql
-        when /show_source/
-          show_source
         when /^\/newrelic\/?$/
           index
         else
@@ -83,7 +115,7 @@ module NewRelic
           @obfuscated_sql = @segment.obfuscated_sql
         end
 
-        headers, explanations = @segment.explain_sql
+        _headers, explanations = @segment.explain_sql
         if explanations
           @explanation = explanations
           if !@explanation.blank?
@@ -101,7 +133,9 @@ module NewRelic
       end
 
       def profile
-        NewRelic::Control.instance.profiling = params['start'] == 'true'
+        should_be_on = (params['start'] == 'true')
+        NewRelic::Rack::DeveloperMode.profiling_enabled = should_be_on
+
         index
       end
 
@@ -114,12 +148,13 @@ module NewRelic
         if view.is_a? Hash
           layout = false
           if view[:object]
+            # object *is* used here, as it is capture in the binding below
             object = view[:object]
           end
 
           if view[:collection]
-            return view[:collection].map do |object|
-              render({:partial => view[:partial], :object => object})
+            return view[:collection].map do |obj|
+              render({:partial => view[:partial], :object => obj})
             end.join(' ')
           end
 
@@ -137,7 +172,7 @@ module NewRelic
           body = render_without_layout(view, binding)
         end
         if add_rack_array
-          ::Rack::Response.new(body).finish
+          ::Rack::Response.new(body, 200, {'Content-Type' => 'text/html'}).finish
         else
           body
         end
@@ -173,44 +208,6 @@ module NewRelic
         @segment
       end
 
-
-      # show the selected source file with the highlighted selected line
-      def show_source
-        @filename = params['file']
-        line_number = params['line'].to_i
-
-        if !File.readable?(@filename)
-          @source="<p>Unable to read #{@filename}.</p>"
-          return
-        end
-        begin
-          file = File.new(@filename, 'r')
-        rescue => e
-          @source="<p>Unable to access the source file #{@filename} (#{e.message}).</p>"
-          return
-        end
-        @source = ""
-
-        @source << "<pre>"
-        file.each_line do |line|
-          # place an anchor 6 lines above the selected line (if the line # < 6)
-          if file.lineno == line_number - 6
-            @source << "</pre><pre id = 'selected_line'>"
-            @source << line.rstrip
-            @source << "</pre><pre>"
-
-            # highlight the selected line
-          elsif file.lineno == line_number
-            @source << "</pre><pre class = 'selected_source_line'>"
-            @source << line.rstrip
-            @source << "</pre><pre>"
-          else
-            @source << line
-          end
-        end
-        render(:show_source)
-      end
-
       def show_sample_data
         get_sample
 
@@ -219,7 +216,7 @@ module NewRelic
         @request_params = @sample.params['request_params'] || {}
         @custom_params = @sample.params['custom_params'] || {}
 
-        controller_metric = @sample.root_segment.called_segments.first.metric_name
+        controller_metric = @sample.transaction_name
 
         metric_parser = NewRelic::MetricParser::MetricParser.for_metric_named controller_metric
         @sample_controller_name = metric_parser.controller_name
@@ -232,17 +229,16 @@ module NewRelic
 
         sort_method = params['sort'] || :total_time
         @profile_options = {:min_percent => 0.5, :sort_method => sort_method.to_sym}
-        
+
         render(:show_sample)
       end
 
       def get_samples
-        @samples = NewRelic::Agent.instance.transaction_sampler.samples.select do |sample|
+        @samples = NewRelic::Agent.instance.transaction_sampler.dev_mode_sample_buffer.samples.select do |sample|
           sample.params[:path] != nil
         end
 
-        return @samples = @samples.sort{|x,y| y.omit_segments_with('(Rails/Application Code Loading)|(Database/.*/.+ Columns)').duration <=>
-          x.omit_segments_with('(Rails/Application Code Loading)|(Database/.*/.+ Columns)').duration} if params['h']
+        return @samples = @samples.sort_by(&:duration).reverse                   if params['h']
         return @samples = @samples.sort{|x,y| x.params[:uri] <=> y.params[:uri]} if params['u']
         @samples = @samples.reverse
       end
@@ -253,7 +249,7 @@ module NewRelic
         sample_id = id.to_i
         @samples.each do |s|
           if s.sample_id == sample_id
-            @sample = stripped_sample(s)
+            @sample = s
             return
           end
         end

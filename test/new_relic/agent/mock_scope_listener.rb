@@ -1,23 +1,24 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 
 class NewRelic::Agent::MockScopeListener
 
-  attr_reader :scope
+  attr_reader :scopes
 
   def initialize
-    @scope = {}
+    @scopes = []
   end
 
-  def notice_first_scope_push(time)
+  def notice_push_frame(state, time)
   end
 
-  def notice_push_scope(scope, time)
-    @scope[scope] = true
+  def notice_pop_frame(state, scope, time)
+    @scopes << scope
   end
 
-  def notice_pop_scope(scope, time)
-  end
-
-  def notice_scope_empty(time)
+  def on_finishing_transaction(time)
   end
 
   def enabled?

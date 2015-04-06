@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic
   module Instrumentation
     module ActsAsSolrInstrumentation
@@ -19,7 +23,7 @@ end
 
 DependencyDetection.defer do
   @name = :acts_as_solr
-  
+
   depends_on do
     defined?(ActsAsSolr)
   end
@@ -35,11 +39,11 @@ DependencyDetection.defer do
   depends_on do
     defined?(ActsAsSolr::CommonMethods)
   end
-  
+
   executes do
     ::NewRelic::Agent.logger.info 'Installing ActsAsSolr instrumentation'
   end
-  
+
   executes do
     ActsAsSolr::ParserMethods.module_eval do
       include NewRelic::Instrumentation::ActsAsSolrInstrumentation::ParserMethodsInstrumentation

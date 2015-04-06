@@ -1,126 +1,104 @@
-ENV['SKIP_RAILS'] = 'true'
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path('../../../test_helper', __FILE__)
-require File.expand_path('../../../test_contexts', __FILE__)
 
-class NewRelic::Agent::RpmAgentTest < Test::Unit::TestCase # ActiveSupport::TestCase
-  extend TestContexts
+class NewRelic::Agent::RpmAgentTest < Minitest::Test
+  def setup
+    NewRelic::Agent.manual_start
+    @agent = NewRelic::Agent.instance
+    @agent.stubs(:start_worker_thread)
+  end
 
-  attr_reader :agent
+  def teardown
+    NewRelic::Agent.instance.shutdown
+  end
 
-  with_running_agent do
-    # Fake out the agent to think mongrel is running
-
-    should "agent_setup" do
-      assert NewRelic::Agent.instance.class == NewRelic::Agent::Agent
-      assert_raise RuntimeError do
-        NewRelic::Control.instance.init_plugin :agent_enabled => false
-      end
+  def test_public_apis
+    assert_raises(RuntimeError) do
+      NewRelic::Agent.set_sql_obfuscator(:unknown) { |sql| puts sql }
     end
 
-    should "public_apis" do
-      assert_raise RuntimeError do
-        NewRelic::Agent.set_sql_obfuscator(:unknown) do |sql|
-          puts sql
-        end
-      end
-
-      ignore_called = false
-      NewRelic::Agent.ignore_error_filter do |e|
-        ignore_called = true
-        nil
-      end
+    ignore_called = false
+    filter = Proc.new do |e|
+      ignore_called = true
+      nil
+    end
+    with_ignore_error_filter(filter) do
       NewRelic::Agent.notice_error(StandardError.new("message"), :request_params => {:x => "y"})
-      assert ignore_called
-      NewRelic::Agent.instance.error_collector.instance_variable_set '@ignore_filter', nil
     end
 
-    should "startup_shutdown" do
-      with_config(:agent_enabled => true) do
-        @agent = NewRelic::Agent::ShimAgent.instance
-        @agent.shutdown
-        assert (not @agent.started?)
-        @agent.start
-        assert !@agent.started?
-        # this installs the real agent:
-        NewRelic::Agent.manual_start
-        @agent = NewRelic::Agent.instance
-        assert @agent != NewRelic::Agent::ShimAgent.instance
-        assert @agent.started?
-        @agent.shutdown
-        assert !@agent.started?
-        @agent.start
-        assert @agent.started?
-        NewRelic::Agent.shutdown
-      end
-    end
+    assert(ignore_called)
+  end
 
-    should "manual_start" do
-      NewRelic::Agent.instance.expects(:connect).once
-      NewRelic::Agent.instance.expects(:start_worker_thread).once
-      NewRelic::Agent.instance.instance_variable_set '@started', nil
+  def test_startup_shutdown_shim
+    with_config(:agent_enabled => true) do
+      shim_agent = NewRelic::Agent::ShimAgent.instance
+      shim_agent.shutdown
+      refute shim_agent.started?
+      shim_agent.start
+      refute shim_agent.started?
+    end
+  end
+
+  def test_startup_shutdown_real
+    with_config(:agent_enabled => true, :monitor_mode => true) do
       NewRelic::Agent.manual_start :monitor_mode => true, :license_key => ('x' * 40)
-      NewRelic::Agent.shutdown
+      agent = NewRelic::Agent.instance
+      assert agent.started?
+      agent.shutdown
+      refute agent.started?
     end
+  end
 
-    should "post_fork_handler" do
-      NewRelic::Agent.manual_start :monitor_mode => true, :license_key => ('x' * 40)
-      NewRelic::Agent.after_fork
-      NewRelic::Agent.after_fork
-      NewRelic::Agent.shutdown
-    end
-    should "manual_overrides" do
-      NewRelic::Agent.manual_start :app_name => "testjobs", :dispatcher_instance_id => "mailer"
-      assert_equal "testjobs", NewRelic::Agent.config.app_names[0]
-      assert_equal "mailer", NewRelic::Control.instance.local_env.dispatcher_instance_id
-      NewRelic::Agent.shutdown
-    end
+  def test_manual_start
+    NewRelic::Agent.instance.expects(:connect).once
+    NewRelic::Agent.instance.expects(:start_worker_thread).once
+    NewRelic::Agent.instance.instance_variable_set '@started', nil
+    NewRelic::Agent.manual_start :monitor_mode => true, :license_key => ('x' * 40)
+    NewRelic::Agent.shutdown
+  end
 
-    should "restart" do
-      NewRelic::Agent.manual_start :app_name => "noapp", :dispatcher_instance_id => ""
-      NewRelic::Agent.manual_start :app_name => "testjobs", :dispatcher_instance_id => "mailer"
-      assert_equal "testjobs", NewRelic::Agent.config.app_names[0]
-      assert_equal "mailer", NewRelic::Control.instance.local_env.dispatcher_instance_id
-      NewRelic::Agent.shutdown
-    end
+  def test_post_fork_handler
+    NewRelic::Agent.manual_start :monitor_mode => true, :license_key => ('x' * 40)
+    NewRelic::Agent.after_fork
+    NewRelic::Agent.after_fork
+    NewRelic::Agent.shutdown
+  end
 
-    should "send_timeslice_data" do
-      # this test fails due to a rubinius bug
-      return if NewRelic::LanguageSupport.using_engine?('rbx')
-      @agent.service.expects(:metric_data).returns([ [{'name' => '/A/b/c'}, 1],
-                                                     [{'name' => '/A/b/c', 'scope' => '/X'}, 2],
-                                                     [{'name' => '/A/b/d'}, 3] ])
-      @agent.send :harvest_and_send_timeslice_data
-      assert_equal 3, @agent.metric_ids.size
-      assert_equal(3, @agent.metric_ids[NewRelic::MetricSpec.new('/A/b/d')],
-                   @agent.metric_ids.inspect)
-    end
-    should "set_record_sql" do
-      @agent.set_record_sql(false)
-      assert !NewRelic::Agent.is_sql_recorded?
+  def test_manual_overrides
+    NewRelic::Agent.manual_start :app_name => "testjobs"
+    assert_equal "testjobs", NewRelic::Agent.config.app_names[0]
+    NewRelic::Agent.shutdown
+  end
+
+  def test_agent_restart
+    NewRelic::Agent.manual_start :app_name => "noapp"
+    NewRelic::Agent.manual_start :app_name => "testjobs"
+    assert_equal "testjobs", NewRelic::Agent.config.app_names[0]
+    NewRelic::Agent.shutdown
+  end
+
+  def test_set_record_sql
+    @agent.set_record_sql(false)
+    assert !NewRelic::Agent.tl_is_sql_recorded?
+    NewRelic::Agent.disable_sql_recording do
+      assert_equal false, NewRelic::Agent.tl_is_sql_recorded?
       NewRelic::Agent.disable_sql_recording do
-        assert_equal false, NewRelic::Agent.is_sql_recorded?
-        NewRelic::Agent.disable_sql_recording do
-          assert_equal false, NewRelic::Agent.is_sql_recorded?
-        end
-        assert_equal false, NewRelic::Agent.is_sql_recorded?
+        assert_equal false, NewRelic::Agent.tl_is_sql_recorded?
       end
-      assert !NewRelic::Agent.is_sql_recorded?
-      @agent.set_record_sql(nil)
+      assert_equal false, NewRelic::Agent.tl_is_sql_recorded?
     end
+    assert !NewRelic::Agent.tl_is_sql_recorded?
+    @agent.set_record_sql(nil)
+  end
 
-    should "version" do
-      assert_match /\d\.\d+\.\d+/, NewRelic::VERSION::STRING
-    end
+  def test_agent_version_string
+    assert_match(/\d\.\d+\.\d+/, NewRelic::VERSION::STRING)
+  end
 
-    context "with transaction api" do
-      should "reject empty arguments" do
-        assert_raises RuntimeError do
-          NewRelic::Agent.record_transaction 0.5
-        end
-      end
-      should "record a transaction" do
-        NewRelic::Agent.record_transaction 0.5, 'uri' => "/users/create?foo=bar"
-      end
-    end
+  def test_record_transaction
+    NewRelic::Agent.record_transaction 0.5, 'uri' => "/users/create?foo=bar"
   end
 end

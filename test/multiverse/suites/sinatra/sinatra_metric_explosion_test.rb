@@ -1,3 +1,6 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
 class SinatraTestApp < Sinatra::Base
   get '/hello/:name' do |name|
@@ -20,19 +23,16 @@ class SinatraTestApp < Sinatra::Base
   end
 end
 
-class SinatraMetricExplosionTest < Test::Unit::TestCase
+class SinatraMetricExplosionTest < Minitest::Test
   include Rack::Test::Methods
   include ::NewRelic::Agent::Instrumentation::Sinatra
 
+  include MultiverseHelpers
+
+  setup_and_teardown_agent
+
   def app
     SinatraTestApp
-  end
-
-  def setup
-
-    # puts ::NewRelic::Agent.manual_start
-    # puts ::NewRelic::Agent.agent.started?.inspect
-    ::NewRelic::Agent.agent.stats_engine.clear_stats
   end
 
   def test_sinatra_returns_properly
@@ -42,16 +42,18 @@ class SinatraMetricExplosionTest < Test::Unit::TestCase
 
   def test_transaction_name_from_route
     get '/hello/world'
-    metric_names = ::NewRelic::Agent.agent.stats_engine.stats_hash.keys.map{|k| k.name}
-    assert metric_names.include?('Controller/Sinatra/SinatraTestApp/GET hello/([^/?#]+)')
-    assert metric_names.include?('Apdex/Sinatra/SinatraTestApp/GET hello/([^/?#]+)')
+    assert_metrics_recorded([
+      'Controller/Sinatra/SinatraTestApp/GET hello/([^/?#]+)',
+      'Apdex/Sinatra/SinatraTestApp/GET hello/([^/?#]+)'
+    ])
   end
 
   def test_transaction_name_from_path
     get '/wrong'
-    metric_names = ::NewRelic::Agent.agent.stats_engine.stats_hash.keys.map{|k| k.name}
-    assert metric_names.include?('Controller/Sinatra/SinatraTestApp/GET (unknown)')
-    assert metric_names.include?('Apdex/Sinatra/SinatraTestApp/GET (unknown)')
+    assert_metrics_recorded([
+      'Controller/Sinatra/SinatraTestApp/GET (unknown)',
+      'Apdex/Sinatra/SinatraTestApp/GET (unknown)'
+    ])
   end
 
   def test_transaction_name_does_not_explode
@@ -61,17 +63,34 @@ class SinatraMetricExplosionTest < Test::Unit::TestCase
     get '/hello/isitmeyourelookingfor?'
     get '/another_controller'
 
-    metric_names = ::NewRelic::Agent.agent.stats_engine.stats_hash.keys.
-      map{|k| k.name} - ['CPU/User Time', "Middleware/all", "WebFrontend/QueueTime", "WebFrontend/WebServer/all"]
+    metric_names = ::NewRelic::Agent.agent.stats_engine.to_h.keys.map(&:to_s)
+    metric_names -= [
+      'CPU/User Time',
+      "Middleware/all",
+      "WebFrontend/QueueTime",
+      "WebFrontend/WebServer/all",
+    ]
+
+    name_beginnings_to_ignore = [
+      "ApdexAll",
+      "Supportability",
+      "GC/Transaction",
+      "Nested/Controller",
+      "Middleware"
+    ]
+    metric_names.delete_if do|metric|
+      name_beginnings_to_ignore.any? {|name| metric.start_with?(name)}
+    end
+
     assert_equal 6, metric_names.size, "Explosion detected in: #{metric_names.inspect}"
   end
 
   def test_does_not_break_when_no_verb_matches
-    assert_nothing_raised do
-      post '/some/garbage'
-    end
-    metric_names = ::NewRelic::Agent.agent.stats_engine.stats_hash.keys.map{|k| k.name}
-    assert metric_names.include?('Controller/Sinatra/SinatraTestApp/POST (unknown)')
-    assert metric_names.include?('Apdex/Sinatra/SinatraTestApp/POST (unknown)')
+    post '/some/garbage'
+
+    assert_metrics_recorded([
+      'Controller/Sinatra/SinatraTestApp/POST (unknown)',
+      'Apdex/Sinatra/SinatraTestApp/POST (unknown)'
+    ])
   end
 end

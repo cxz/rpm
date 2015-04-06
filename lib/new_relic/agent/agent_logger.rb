@@ -1,73 +1,138 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
+require 'thread'
 require 'logger'
+require 'new_relic/agent/hostname'
 
 module NewRelic
   module Agent
     class AgentLogger
 
-      def initialize(config, root = "", override_logger=nil)
-        create_log(config, root, override_logger)
-        set_log_level!(config)
+      def initialize(root = "", override_logger=nil)
+        @already_logged_lock = Mutex.new
+        clear_already_logged
+        create_log(root, override_logger)
+        set_log_level!
         set_log_format!
 
         gather_startup_logs
       end
 
-      def fatal(*msgs)
-        @log.fatal(format_messages(msgs))
+      def fatal(*msgs, &blk)
+        format_and_send(:fatal, msgs, &blk)
       end
 
-      def error(*msgs)
-        @log.error(format_messages(msgs))
+      def error(*msgs, &blk)
+        format_and_send(:error, msgs, &blk)
       end
 
-      def warn(*msgs)
-        @log.warn(format_messages(msgs))
+      def warn(*msgs, &blk)
+        format_and_send(:warn, msgs, &blk)
       end
 
-      def info(*msgs)
-        @log.info(format_messages(msgs))
+      def info(*msgs, &blk)
+        format_and_send(:info, msgs, &blk)
       end
 
-      def debug(*msgs)
-        @log.debug(format_messages(msgs))
+      def debug(*msgs, &blk)
+        format_and_send(:debug, msgs, &blk)
+      end
+
+      NUM_LOG_ONCE_KEYS = 1000
+
+      def log_once(level, key, *msgs)
+        @already_logged_lock.synchronize do
+          return if @already_logged.include?(key)
+
+          if @already_logged.size >= NUM_LOG_ONCE_KEYS && key.kind_of?(String)
+            # The reason for preventing too many keys in `logged` is for
+            # memory concerns.
+            # The reason for checking the type of the key is that we always want
+            # to allow symbols to log, since there are very few of them.
+            # The assumption here is that you would NEVER pass dynamically-created
+            # symbols, because you would never create symbols dynamically in the
+            # first place, as that would already be a memory leak in most Rubies,
+            # even if we didn't hang on to them all here.
+            return
+          end
+
+          @already_logged[key] = true
+        end
+
+        self.send(level, *msgs)
       end
 
       def is_startup_logger?
-        false
+        @log.is_a?(NullLogger)
       end
 
-      # Allows for passing exceptions in explicitly, which format with backtrace
-      def format_messages(msgs)
-        msgs.map do |msg|
-          if msg.respond_to?(:backtrace)
-            "#{msg.class}: #{msg}\n\t#{(msg.backtrace || []).join("\n\t")}"
+      # Use this when you want to log an exception with explicit control over
+      # the log level that the backtrace is logged at. If you just want the
+      # default behavior of backtraces logged at debug, use one of the methods
+      # above and pass an Exception as one of the args.
+      def log_exception(level, e, backtrace_level=level)
+        @log.send(level, "%p: %s" % [ e.class, e.message ])
+        @log.send(backtrace_level) do
+          backtrace = backtrace_from_exception(e)
+          if backtrace
+            "Debugging backtrace:\n" + backtrace.join("\n  ")
           else
-            msg
-          end
-        end.join("\n")
-      end
-
-      def create_log(config, root, override_logger)
-        if !override_logger.nil?
-          @log = override_logger
-        elsif config[:agent_enabled] == false
-          create_null_logger
-        else
-          if wants_stdout(config)
-            @log = ::Logger.new(STDOUT)
-          else
-            create_log_to_file(config, root)
+            "No backtrace available."
           end
         end
       end
 
-      def create_log_to_file(config, root)
-        path = find_or_create_file_path(config[:log_file_path], root)
+      def backtrace_from_exception(e)
+        # We've seen that often the backtrace on a SystemStackError is bunk
+        # so massage the caller instead at a known depth.
+        #
+        # Tests keep us honest about minmum method depth our log calls add.
+        return caller.drop(5) if e.is_a?(SystemStackError)
+
+        e.backtrace
+      end
+
+      # Allows for passing exceptions in explicitly, which format with backtrace
+      def format_and_send(level, *msgs, &block)
+        if block
+          if @log.send("#{level}?")
+            msgs = Array(block.call)
+          else
+            msgs = []
+          end
+        end
+
+        msgs.flatten.each do |item|
+          case item
+          when Exception then log_exception(level, item, :debug)
+          else @log.send(level, item)
+          end
+        end
+      end
+
+      def create_log(root, override_logger)
+        if !override_logger.nil?
+          @log = override_logger
+        elsif ::NewRelic::Agent.config[:agent_enabled] == false
+          create_null_logger
+        else
+          if wants_stdout?
+            @log = ::Logger.new(STDOUT)
+          else
+            create_log_to_file(root)
+          end
+        end
+      end
+
+      def create_log_to_file(root)
+        path = find_or_create_file_path(::NewRelic::Agent.config[:log_file_path], root)
         if path.nil?
           @log = ::Logger.new(STDOUT)
-          warn("Error creating log directory #{config[:log_file_path]}, using standard out for logging.")
+          warn("Error creating log directory #{::NewRelic::Agent.config[:log_file_path]}, using standard out for logging.")
         else
-          file_path = "#{path}/#{config[:log_file_name]}"
+          file_path = "#{path}/#{::NewRelic::Agent.config[:log_file_name]}"
           begin
             @log = ::Logger.new(file_path)
           rescue => e
@@ -78,12 +143,17 @@ module NewRelic
       end
 
       def create_null_logger
-        null_path = ["/dev/null", "NUL"].detect{|f| File.exists?(f)}
-        @log = ::Logger.new(null_path)
+        @log = ::NewRelic::Agent::NullLogger.new
       end
 
-      def wants_stdout(config)
-        config[:log_file_path].upcase == "STDOUT"
+      def clear_already_logged
+        @already_logged_lock.synchronize do
+          @already_logged = {}
+        end
+      end
+
+      def wants_stdout?
+        ::NewRelic::Agent.config[:log_file_path].upcase == "STDOUT"
       end
 
       def find_or_create_file_path(path_setting, root)
@@ -96,71 +166,36 @@ module NewRelic
         nil
       end
 
-      def set_log_level!(config)
-        @log.level = AgentLogger.log_level_for(config.fetch(:log_level))
+      def set_log_level!
+        @log.level = AgentLogger.log_level_for(::NewRelic::Agent.config[:log_level])
       end
 
       LOG_LEVELS = {
-        "debug" => Logger::DEBUG,
-        "info"  => Logger::INFO,
-        "warn"  => Logger::WARN,
-        "error" => Logger::ERROR,
-        "fatal" => Logger::FATAL,
+        "debug" => ::Logger::DEBUG,
+        "info"  => ::Logger::INFO,
+        "warn"  => ::Logger::WARN,
+        "error" => ::Logger::ERROR,
+        "fatal" => ::Logger::FATAL,
       }
 
       def self.log_level_for(level)
-        LOG_LEVELS.fetch(level.to_s.downcase, Logger::INFO)
+        LOG_LEVELS.fetch(level.to_s.downcase, ::Logger::INFO)
       end
 
       def set_log_format!
-        def @log.format_message(severity, timestamp, progname, msg)
-          prefix = @logdev.dev == STDOUT ? '** [NewRelic]' : ''
-          prefix + "[#{timestamp.strftime("%m/%d/%y %H:%M:%S %z")} #{Socket.gethostname} (#{$$})] #{severity} : #{msg}\n"
+        @hostname = NewRelic::Agent::Hostname.get
+        @prefix = wants_stdout? ? '** [NewRelic]' : ''
+        @log.formatter = Proc.new do |severity, timestamp, progname, msg|
+          "#{@prefix}[#{timestamp.strftime("%m/%d/%y %H:%M:%S %z")} #{@hostname} (#{$$})] #{severity} : #{msg}\n"
         end
       end
 
       def gather_startup_logs
         StartupLogger.instance.dump(self)
       end
-    end
 
-    # Base class for startup logging and testing in multiverse
-    class MemoryLogger
-      def initialize
-        @messages = []
-      end
-
-      def is_startup_logger?
-        true
-      end
-
-      attr_accessor :messages, :level
-
-      def fatal(*msgs)
-        messages << [:fatal, msgs]
-      end
-
-      def error(*msgs)
-        messages << [:error, msgs]
-      end
-
-      def warn(*msgs)
-        messages << [:warn, msgs]
-      end
-
-      def info(*msgs)
-        messages << [:info, msgs]
-      end
-
-      def debug(*msgs)
-        messages << [:debug, msgs]
-      end
-
-      def dump(logger)
-        messages.each do |msg|
-          logger.send(msg[0], msg[1])
-        end
-        messages.clear
+      def log_formatter=(formatter)
+        @log.formatter = formatter
       end
     end
 

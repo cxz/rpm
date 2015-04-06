@@ -1,14 +1,23 @@
-# https://newrelic.atlassian.net/browse/RUBY-747
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
-require 'rails/test_help'
+# https://newrelic.atlassian.net/browse/RUBY-747
+require './app'
 require 'fake_collector'
+require File.expand_path(File.join(File.dirname(__FILE__), '..', '..', '..', 'helpers', 'exceptions'))
 
 class ErrorController < ApplicationController
-  include Rails.application.routes.url_helpers
+  include NewRelic::TestHelpers::Exceptions
+
   newrelic_ignore :only => :ignored_action
 
   def controller_error
     raise 'this is an uncaught controller error'
+  end
+
+  def exception_error
+    raise Exception.new('wobble')
   end
 
   def view_error
@@ -24,111 +33,164 @@ class ErrorController < ApplicationController
   end
 
   def ignored_error
-    raise IgnoredError.new('this error should not be noticed')
+    raise NewRelic::TestHelpers::Exceptions::IgnoredError.new('this error should not be noticed')
   end
 
   def server_ignored_error
-    raise ServerIgnoredError.new('this is a server ignored error')
+    raise NewRelic::TestHelpers::Exceptions::ServerIgnoredError.new('this is a server ignored error')
+  end
+
+  def frozen_error
+    e = RuntimeError.new("frozen errors make a refreshing treat on a hot summer day")
+    e.freeze
+    raise e
+  end
+
+  def string_noticed_error
+    NewRelic::Agent.notice_error("trilobites died out millions of years ago")
+    render :text => 'trilobites'
   end
 
   def noticed_error
     newrelic_notice_error(RuntimeError.new('this error should be noticed'))
     render :text => "Shoulda noticed an error"
   end
+
+  def middleware_error
+    render :text => 'everything went great'
+  end
+
+  def error_with_custom_params
+    NewRelic::Agent.add_custom_parameters(:texture => 'chunky')
+    raise 'bad things'
+  end
+
+  if Rails::VERSION::MAJOR == 2
+    filter_parameter_logging(:secret)
+  end
 end
 
-class IgnoredError < StandardError; end
-class ServerIgnoredError < StandardError; end
+class ErrorsWithoutSSCTest < RailsMultiverseTest
+  extend Multiverse::Color
 
-class ErrorsWithoutSSCTest < ActionDispatch::IntegrationTest
-  def setup
-    $collector ||= NewRelic::FakeCollector.new
-    $collector.reset
-    setup_collector
-    $collector.run
+  include MultiverseHelpers
 
-    NewRelic::Agent.reset_config
-    NewRelic::Agent.instance_variable_set(:@agent, nil)
-    NewRelic::Agent::Agent.instance_variable_set(:@instance, nil)
-    NewRelic::Agent.manual_start
-
-    reset_error_collector
+  setup_and_teardown_agent do |collector|
+    setup_collector_mocks
+    @error_collector = agent.error_collector
   end
 
   # Let base class override this without moving where we start the agent
-  def setup_collector
-    $collector.mock['connect'] = [200, {'return_value' => {"agent_run_id" => 666 }}]
+  def setup_collector_mocks
+    $collector.stub('connect', {"agent_run_id" => 666 }, 200)
   end
 
-  def teardown
-    NewRelic::Agent::Agent.instance.shutdown if NewRelic::Agent::Agent.instance
-    NewRelic::Agent::Agent.instance_variable_set(:@instance, nil)
+  def last_error
+    @error_collector.errors.last
   end
 
-  def reset_error_collector
-    @error_collector = NewRelic::Agent::Agent.instance.error_collector
+  if Rails::VERSION::MAJOR >= 3
+    def test_error_collector_should_be_enabled
+      assert NewRelic::Agent.config[:agent_enabled]
+      assert NewRelic::Agent.config[:'error_collector.enabled']
+      assert @error_collector.enabled?
+    end
 
-    # sanity checks
-    assert(@error_collector.enabled?,
-           'error collector should be enabled')
-    assert(!NewRelic::Agent.instance.error_collector.ignore_error_filter,
-           'no ignore error filter should be set')
-  end
+    def test_should_capture_routing_error
+      get '/bad_route'
+      assert_error_reported_once('this is an uncaught routing error', nil, nil)
+    end
 
+    def test_should_capture_errors_raised_in_middleware_before_call
+      get '/error/middleware_error/before'
+      assert_error_reported_once('middleware error', nil, nil)
+    end
 
-  def test_error_collector_should_be_enabled
-    assert NewRelic::Agent.config[:agent_enabled]
-    assert NewRelic::Agent.config[:'error_collector.enabled']
-    assert @error_collector.enabled?
-    assert Rails.application.config.middleware.include?(NewRelic::Rack::ErrorCollector)
+    def test_should_capture_errors_raised_in_middleware_after_call
+      get '/error/middleware_error/after'
+      assert_error_reported_once('middleware error', nil, nil)
+    end
+
+    def test_should_capture_request_uri_and_params
+      get '/error/controller_error?eat=static'
+      assert_equal('/error/controller_error', last_error.params[:request_uri])
+
+      expected_params = { 'eat' => 'static' }
+
+      if Rails::VERSION::MAJOR == 3
+        expected_params['action']     = 'controller_error'
+        expected_params['controller'] = 'error'
+      end
+
+      assert_equal(expected_params, last_error.params[:request_params])
+    end
   end
 
   def test_should_capture_error_raised_in_view
     get '/error/view_error'
-    assert_error_reported_once('this is an uncaught view error')
+    assert_error_reported_once('this is an uncaught view error',
+                               'Controller/error/view_error')
   end
 
   def test_should_capture_error_raised_in_controller
     get '/error/controller_error'
-    assert_error_reported_once('this is an uncaught controller error')
+    assert_error_reported_once('this is an uncaught controller error',
+                               'Controller/error/controller_error')
   end
 
   def test_should_capture_error_raised_in_model
     get '/error/model_error'
-    assert_error_reported_once('this is an uncaught model error')
+    assert_error_reported_once('this is an uncaught model error',
+                               'Controller/error/model_error')
   end
 
   def test_should_capture_noticed_error_in_controller
     get '/error/noticed_error'
-    assert_error_reported_once('this error should be noticed')
+    assert_error_reported_once('this error should be noticed',
+                               'Controller/error/noticed_error')
+  end
+
+  def test_should_capture_frozen_errors
+    get '/error/frozen_error'
+    assert_error_reported_once("frozen errors make a refreshing treat on a hot summer day",
+                               "Controller/error/frozen_error")
+  end
+
+  def test_should_capture_string_noticed_errors
+    get '/error/string_noticed_error'
+    assert_error_reported_once("trilobites died out millions of years ago",
+                               "Controller/error/string_noticed_error")
   end
 
   # Important choice of controllor_error, since this goes through both the
-  # metric_frame and the rack error collector, so risks multiple counting!
+  # transaction and the rack error collector, so risks multiple counting!
   def test_should_capture_multiple_errors
     40.times do
       get '/error/controller_error'
     end
 
-    assert_errors_reported('this is an uncaught controller error', 20, 40)
+    assert_errors_reported('this is an uncaught controller error',
+                           NewRelic::Agent::ErrorCollector::MAX_ERROR_QUEUE_LENGTH,
+                           40, nil, 40)
   end
 
   def test_should_capture_manually_noticed_error
     NewRelic::Agent.notice_error(RuntimeError.new('this is a noticed error'))
-    assert_error_reported_once('this is a noticed error')
+    assert_error_reported_once('this is a noticed error', nil, nil)
   end
 
-  def test_should_capture_routing_error
-    get '/bad_route'
-    assert_error_reported_once('this is an uncaught routing error')
+  def test_should_apply_parameter_filtering
+    get '/error/controller_error?secret=shouldnotbecaptured&other=whatever'
+    params = last_error.params[:request_params]
+    assert_equal('[FILTERED]', params['secret'])
+    assert_equal('whatever', params['other'])
   end
 
-  def test_should_capture_request_uri_and_params
-    get '/bad_route?eat=static'
-    assert_equal('/bad_route',
-                 @error_collector.errors[0].params[:request_uri])
-    assert_equal({'eat' => 'static'},
-                 @error_collector.errors[0].params[:request_params])
+  def test_should_apply_parameter_filtering_for_non_standard_errors
+    get '/error/exception_error?secret=shouldnotbecaptured&other=whatever'
+    params = last_error.params[:request_params]
+    assert_equal('[FILTERED]', params['secret'])
+    assert_equal('whatever', params['other'])
   end
 
   def test_should_not_notice_errors_from_ignored_action
@@ -143,12 +205,23 @@ class ErrorsWithoutSSCTest < ActionDispatch::IntegrationTest
            'Noticed an error that should have been ignored')
   end
 
+  def test_should_not_fail_apdex_for_ignored_error_class_noticed
+    get '/error/ignored_error'
+    assert_metrics_recorded({
+      'Apdex'                     => { :apdex_f => 0 },
+      'Apdex/error/ignored_error' => { :apdex_f => 0 }
+    })
+  end
+
   def test_should_not_notice_filtered_errors
-    NewRelic::Agent.instance.error_collector.ignore_error_filter do |error|
+    filter = Proc.new do |error|
       !error.kind_of?(RuntimeError)
     end
 
-    get 'test/controller_error'
+    with_ignore_error_filter(filter) do
+      get '/error/controller_error'
+    end
+
     assert(NewRelic::Agent.instance.error_collector.errors.empty?,
            'Noticed an error that should have been ignored')
   end
@@ -158,32 +231,61 @@ class ErrorsWithoutSSCTest < ActionDispatch::IntegrationTest
     assert_error_reported_once('this is a server ignored error')
   end
 
- protected
+  # These really shouldn't be skipped for Rails 4, see RUBY-1242
+  if ::Rails::VERSION::MAJOR.to_i < 4
+    def test_captured_errors_should_include_custom_params
+      get '/error/error_with_custom_params'
+      assert_error_reported_once('bad things')
+      error = errors_with_message('bad things').first
+      custom_params = error.params[:custom_params]
+      assert_equal({:texture => 'chunky'}, custom_params)
+    end
 
-  def assert_errors_reported(message, queued_count, total_count=queued_count)
-    error_count = NewRelic::Agent::Agent.instance.stats_engine.get_stats("Errors/all")
-    assert_equal total_count, error_count.call_count
-
-    assert_equal(queued_count,
-      @error_collector.errors.select{|error| error.message == message}.size,
-      "Wrong number of errors with message '#{message} found'")
+    def test_captured_errors_should_not_include_custom_params_if_config_says_no
+      with_config(:'error_collector.capture_attributes' => false) do
+        get '/error/error_with_custom_params'
+      end
+      assert_error_reported_once('bad things')
+      error = errors_with_message('bad things').first
+      custom_params = error.params[:custom_params]
+      assert_equal({}, custom_params)
+    end
   end
 
-  def assert_error_reported_once(message)
-    assert_errors_reported(message, 1)
+ protected
+
+  def errors_with_message(message)
+    @error_collector.errors.select{|error| error.message == message}
+  end
+
+  def assert_errors_reported(message, queued_count, total_count=queued_count, txn_name=nil, apdex_f=1)
+    expected = { :call_count => total_count }
+    assert_metrics_recorded("Errors/all" => expected)
+    assert_metrics_recorded("Errors/#{txn_name}" => expected) if txn_name
+
+    unless apdex_f.nil?
+      assert_metrics_recorded("Apdex" => { :apdex_f => apdex_f })
+    end
+
+    assert_equal(queued_count,
+      errors_with_message(message).size,
+      "Wrong number of errors with message #{message.inspect} found")
+  end
+
+  def assert_error_reported_once(message, txn_name=nil, apdex_f=1)
+    assert_errors_reported(message, 1, 1, txn_name, apdex_f)
   end
 end
 
 class ErrorsWithSSCTest < ErrorsWithoutSSCTest
-  def setup_collector
-    $collector.mock['connect'] = [200, {'return_value' => {
+  def setup_collector_mocks
+    $collector.stub('connect', {
       "listen_to_server_config" => true,
       "agent_run_id" => 1,
-      "error_collector.ignore_errors" => 'IgnoredError,ServerIgnoredError',
+      "error_collector.ignore_errors" => 'NewRelic::TestHelpers::Exceptions::IgnoredError,NewRelic::TestHelpers::Exceptions::ServerIgnoredError',
       "error_collector.enabled" => true,
-      "error_collector.capture_source" => true,
       "collect_errors" => true
-    }}]
+    }, 200)
   end
 
   def test_should_notice_server_ignored_error_if_no_server_side_config
@@ -193,7 +295,7 @@ class ErrorsWithSSCTest < ErrorsWithoutSSCTest
   def test_should_ignore_server_ignored_errors
     get '/error/server_ignored_error'
     assert(@error_collector.errors.empty?,
-           'Noticed an error that should have been ignored')
+           'Noticed an error that should have been ignored' + @error_collector.errors.join(', '))
   end
 
 end

@@ -1,5 +1,9 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','..','test_helper'))
-class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
+class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Minitest::Test
   require 'new_relic/agent/error_collector'
   include NewRelic::Agent::ErrorCollector::NoticeError
 
@@ -81,29 +85,6 @@ class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
     end
   end
 
-  def test_extract_source_base
-    with_config(:'error_collector.capture_source' => true) do
-      error_collector = NewRelic::Agent::ErrorCollector.new
-      error_collector.expects(:sense_method).with(nil, 'source_extract')
-      assert_equal(nil, error_collector.extract_source(nil))
-    end
-  end
-
-  def test_extract_source_disabled
-    with_config(:'error_collector.capture_source' => false) do
-      error_collector = NewRelic::Agent::ErrorCollector.new
-      assert_equal(nil, error_collector.extract_source(mock('exception')))
-    end
-  end
-
-  def test_extract_source_with_source
-    with_config(:'error_collector.capture_source' => true) do
-      error_collector = NewRelic::Agent::ErrorCollector.new
-      error_collector.expects(:sense_method).with('happy', 'source_extract').returns('THE SOURCE')
-      assert_equal('THE SOURCE', error_collector.extract_source('happy'))
-    end
-  end
-
   def test_extract_stack_trace
     exception = mock('exception')
     self.expects(:sense_method).with(exception, 'original_exception')
@@ -125,7 +106,7 @@ class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
   end
 
   def test_over_queue_limit_positive
-    @errors = %w(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21)
+    @errors = (1..21).map{|_| NewRelic::NoticedError.new("", {}, nil)}
     expects_logging(:warn, includes('The error reporting queue has reached 20'))
     assert over_queue_limit?('hooray')
   end
@@ -134,9 +115,8 @@ class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
     exception = mock('exception')
     self.expects(:sense_method).with(exception, 'file_name').returns('file_name')
     self.expects(:sense_method).with(exception, 'line_number').returns('line_number')
-    self.expects(:extract_source).with(exception).returns('source')
     self.expects(:extract_stack_trace).with(exception).returns('stack_trace')
-    assert_equal({:file_name => 'file_name', :line_number => 'line_number', :source => 'source', :stack_trace => 'stack_trace'},
+    assert_equal({:file_name => 'file_name', :line_number => 'line_number', :stack_trace => 'stack_trace'},
                  exception_info(exception))
   end
 
@@ -160,39 +140,34 @@ class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
     assert_equal([], @errors)
   end
 
-  def test_should_exit_notice_error_disabled
+  def test_skip_notice_error_is_true_if_the_error_collector_is_disabled
     error = mocked_error
     with_error_collector_config(:'error_collector.enabled' => false) do |error_collector|
-      assert error_collector.should_exit_notice_error?(error)
+      assert error_collector.skip_notice_error?(NewRelic::Agent::TransactionState.tl_get, error)
     end
   end
 
-  def test_should_exit_notice_error_nil
+  def test_skip_notice_error_is_true_if_the_error_is_nil
     error = nil
     with_error_collector_config(:'error_collector.enabled' => true) do |error_collector|
       error_collector.expects(:error_is_ignored?).with(error).returns(false)
-      # we increment it for the case that someone calls
-      # NewRelic::Agent.notice_error(foo) # foo is nil
-      # (which is probably not a good idea but is the existing api)
-      error_collector.expects(:increment_error_count!)
-      assert error_collector.should_exit_notice_error?(error)
+      assert error_collector.skip_notice_error?(NewRelic::Agent::TransactionState.tl_get, error)
     end
   end
 
-  def test_should_exit_notice_error_positive
+  def test_skip_notice_error_is_true_if_the_error_is_ignored
     error = mocked_error
     with_error_collector_config(:'error_collector.enabled' => true) do |error_collector|
       error_collector.expects(:error_is_ignored?).with(error).returns(true)
-      assert error_collector.should_exit_notice_error?(error)
+      assert error_collector.skip_notice_error?(NewRelic::Agent::TransactionState.tl_get, error)
     end
   end
 
-  def test_should_exit_notice_error_negative
+  def test_skip_notice_error_returns_false_for_non_nil_unignored_errors_with_an_enabled_error_collector
     error = mocked_error
     with_error_collector_config(:'error_collector.enabled' => true) do |error_collector|
       error_collector.expects(:error_is_ignored?).with(error).returns(false)
-      error_collector.expects(:increment_error_count!)
-      assert !error_collector.should_exit_notice_error?(error)
+      assert !error_collector.skip_notice_error?(NewRelic::Agent::TransactionState.tl_get, error)
     end
   end
 
@@ -216,20 +191,33 @@ class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
 
   def test_filtered_by_error_filter_empty
     # should return right away when there's no filter
-    @ignore_filter = nil
     assert !filtered_by_error_filter?(nil)
   end
 
   def test_filtered_by_error_filter_positive
     error = mocked_error
-    @ignore_filter = lambda { |x| assert_equal error, x; false  }
+    self.class.class_eval do
+      define_method(:ignore_filter_proc) do |e|
+        assert_equal(error, e)
+        false
+      end
+    end
     assert filtered_by_error_filter?(error)
+  ensure
+    self.class.class_eval { undef :ignore_filter_proc }
   end
 
   def test_filtered_by_error_filter_negative
     error = mocked_error
-    @ignore_filter = lambda { |x| assert_equal error, x; true  }
+    self.class.class_eval do
+      define_method(:ignore_filter_proc) do |e|
+        assert_equal(error, e)
+        true
+      end
+    end
     assert !filtered_by_error_filter?(error)
+  ensure
+    self.class.class_eval { undef :ignore_filter_proc }
   end
 
   def test_error_is_ignored_positive
@@ -265,4 +253,9 @@ class NewRelic::Agent::ErrorCollector::NoticeErrorTest < Test::Unit::TestCase
       yield NewRelic::Agent::ErrorCollector.new
     end
   end
+
+  def ignore_error_filter
+    @ignore_filter
+  end
+
 end

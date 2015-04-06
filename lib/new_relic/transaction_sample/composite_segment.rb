@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'new_relic/transaction_sample'
 require 'new_relic/transaction_sample/segment'
 require 'new_relic/transaction_sample/summary_segment'
@@ -8,7 +12,7 @@ module NewRelic
 
       def initialize(segments)
         summary = SummarySegment.new(segments.first)
-        super summary.entry_timestamp, "Repeating pattern (#{segments.length} repeats)", nil
+        super summary.entry_timestamp, "Repeating pattern (#{segments.length} repeats)"
 
         summary.end_trace(segments.last.exit_timestamp)
 

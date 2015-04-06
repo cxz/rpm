@@ -1,7 +1,13 @@
-require 'new_relic/agent/instrumentation/metric_frame'
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
+require 'new_relic/agent/transaction'
 require 'new_relic/agent/instrumentation/queue_time'
+require 'new_relic/agent/instrumentation/ignore_actions'
 module NewRelic
   module Agent
+    # @api public
     module Instrumentation
       # == NewRelic instrumentation for controller actions and tasks
       #
@@ -15,6 +21,8 @@ module NewRelic
       # For details on how to instrument background tasks see
       # ClassMethods#add_transaction_tracer and
       # #perform_action_with_newrelic_trace
+      #
+      # @api public
       #
       module ControllerInstrumentation
 
@@ -35,25 +43,37 @@ module NewRelic
           end
           def newrelic_notice_error(*args); end
           def new_relic_trace_controller_action(*args); yield; end
-          def newrelic_metric_path; end
           def perform_action_with_newrelic_trace(*args); yield; end
         end
 
+        NR_DO_NOT_TRACE_KEY   = :'@do_not_trace'   unless defined?(NR_DO_NOT_TRACE_KEY  )
+        NR_IGNORE_APDEX_KEY   = :'@ignore_apdex'   unless defined?(NR_IGNORE_APDEX_KEY  )
+        NR_IGNORE_ENDUSER_KEY = :'@ignore_enduser' unless defined?(NR_IGNORE_ENDUSER_KEY)
+        NR_DEFAULT_OPTIONS    = {}.freeze          unless defined?(NR_DEFAULT_OPTIONS   )
+
+        # @api public
         module ClassMethods
           # Have NewRelic ignore actions in this controller.  Specify the actions as hash options
           # using :except and :only.  If no actions are specified, all actions are ignored.
+          #
+          # @api public
+          #
           def newrelic_ignore(specifiers={})
-            newrelic_ignore_aspect('do_not_trace', specifiers)
+            newrelic_ignore_aspect(NR_DO_NOT_TRACE_KEY, specifiers)
           end
           # Have NewRelic omit apdex measurements on the given actions.  Typically used for
           # actions that are not user facing or that skew your overall apdex measurement.
           # Accepts :except and :only options, as with #newrelic_ignore.
+          #
+          # @api public
+          #
           def newrelic_ignore_apdex(specifiers={})
-            newrelic_ignore_aspect('ignore_apdex', specifiers)
+            newrelic_ignore_aspect(NR_IGNORE_APDEX_KEY, specifiers)
           end
 
+          # @api public
           def newrelic_ignore_enduser(specifiers={})
-            newrelic_ignore_aspect('ignore_enduser', specifiers)
+            newrelic_ignore_aspect(NR_IGNORE_ENDUSER_KEY, specifiers)
           end
 
           def newrelic_ignore_aspect(property, specifiers={}) # :nodoc:
@@ -69,10 +89,11 @@ module NewRelic
           # Should be monkey patched into the controller class implemented
           # with the inheritable attribute mechanism.
           def newrelic_write_attr(attr_name, value) # :nodoc:
-            instance_variable_set "@#{attr_name}", value
+            instance_variable_set(attr_name, value)
           end
+
           def newrelic_read_attr(attr_name) # :nodoc:
-            instance_variable_get "@#{attr_name}"
+            instance_variable_get(attr_name)
           end
 
           # Add transaction tracing to the given method.  This will treat
@@ -127,48 +148,114 @@ module NewRelic
           # See NewRelic::Agent::Instrumentation::ControllerInstrumentation#perform_action_with_newrelic_trace
           # for the full list of available options.
           #
+          # @api public
+          #
           def add_transaction_tracer(method, options={})
             # The metric path:
             options[:name] ||= method.to_s
-            # create the argument list:
-            options_arg = []
-            options.each do |key, value|
-              valuestr = case
-                         when value.is_a?(Symbol)
-                           value.inspect
-                         when key == :params
-                           value.to_s
-                         else
-                           %Q["#{value.to_s}"]
-                         end
-              options_arg << %Q[:#{key} => #{valuestr}]
+
+            argument_list = generate_argument_list(options)
+            traced_method, punctuation = parse_punctuation(method)
+            with_method_name, without_method_name = build_method_names(traced_method, punctuation)
+
+            if already_added_transaction_tracer?(self, with_method_name)
+              ::NewRelic::Agent.logger.warn("Transaction tracer already in place for class = #{self.name}, method = #{method.to_s}, skipping")
+              return
             end
-            traced_method, punctuation = method.to_s.sub(/([?!=])$/, ''), $1
-            visibility = NewRelic::Helper.instance_method_visibility self, method
 
             class_eval <<-EOC
-              def #{traced_method.to_s}_with_newrelic_transaction_trace#{punctuation}(*args, &block)
-                perform_action_with_newrelic_trace(#{options_arg.join(',')}) do
-                  #{traced_method.to_s}_without_newrelic_transaction_trace#{punctuation}(*args, &block)
+              def #{with_method_name}(*args, &block)
+                perform_action_with_newrelic_trace(#{argument_list.join(',')}) do
+                  #{without_method_name}(*args, &block)
                  end
               end
             EOC
-            without_method_name = "#{traced_method.to_s}_without_newrelic_transaction_trace#{punctuation}"
-            with_method_name = "#{traced_method.to_s}_with_newrelic_transaction_trace#{punctuation}"
+
+            visibility = NewRelic::Helper.instance_method_visibility self, method
+
             alias_method without_method_name, method.to_s
             alias_method method.to_s, with_method_name
             send visibility, method
             send visibility, with_method_name
             ::NewRelic::Agent.logger.debug("Traced transaction: class = #{self.name}, method = #{method.to_s}, options = #{options.inspect}")
           end
+
+          def parse_punctuation(method)
+            [method.to_s.sub(/([?!=])$/, ''), $1]
+          end
+
+          def generate_argument_list(options)
+            options.map do |key, value|
+              value = if value.is_a?(Symbol)
+                value.inspect
+              elsif key == :params
+                value.to_s
+              else
+                %Q["#{value.to_s}"]
+              end
+
+              %Q[:#{key} => #{value}]
+            end
+          end
+
+          def build_method_names(traced_method, punctuation)
+            [ "#{traced_method.to_s}_with_newrelic_transaction_trace#{punctuation}",
+              "#{traced_method.to_s}_without_newrelic_transaction_trace#{punctuation}" ]
+          end
+
+          def already_added_transaction_tracer?(target, with_method_name)
+            if NewRelic::Helper.instance_methods_include?(target, with_method_name)
+              true
+            else
+              false
+            end
+          end
         end
 
-        # Must be implemented in the controller class:
-        # Determine the path that is used in the metric name for
-        # the called controller action.  Of the form controller_path/action_name
-        #
-        def newrelic_metric_path(action_name_override = nil) # :nodoc:
-          raise "Not implemented!"
+        class TransactionNamer
+          def self.name_for(txn, traced_obj, category, options={})
+            "#{prefix_for_category(txn, category)}#{path_name(traced_obj, options)}"
+          end
+
+          def self.prefix_for_category(txn, category = nil)
+            category ||= (txn && txn.category)
+            case category
+            when :controller then ::NewRelic::Agent::Transaction::CONTROLLER_PREFIX
+            when :task       then ::NewRelic::Agent::Transaction::TASK_PREFIX
+            when :rack       then ::NewRelic::Agent::Transaction::RACK_PREFIX
+            when :uri        then ::NewRelic::Agent::Transaction::CONTROLLER_PREFIX
+            when :sinatra    then ::NewRelic::Agent::Transaction::SINATRA_PREFIX
+            when :middleware then ::NewRelic::Agent::Transaction::MIDDLEWARE_PREFIX
+            when :grape      then ::NewRelic::Agent::Transaction::GRAPE_PREFIX
+            else "#{category.to_s}/" # for internal use only
+            end
+          end
+
+          def self.path_name(traced_obj, options={})
+            return options[:path] if options[:path]
+
+            class_name = class_name(traced_obj, options)
+            if options[:name]
+              if class_name
+                "#{class_name}/#{options[:name]}"
+              else
+                options[:name]
+              end
+            elsif traced_obj.respond_to?(:newrelic_metric_path)
+              traced_obj.newrelic_metric_path
+            else
+              class_name
+            end
+          end
+
+          def self.class_name(traced_obj, options={})
+            return options[:class_name] if options[:class_name]
+            if (traced_obj.is_a?(Class) || traced_obj.is_a?(Module))
+              traced_obj.name
+            else
+              traced_obj.class.name
+            end
+          end
         end
 
         # Yield to the given block with NewRelic tracing.  Used by
@@ -213,7 +300,7 @@ module NewRelic
         # * <tt>:category => :task</tt> indicates that this is a
         #   background task and will show up in New Relic with other background
         #   tasks instead of in the controllers list
-        # * <tt>:category => :rack</tt> if you are instrumenting a rack
+        # * <tt>:category => :middleware</tt> if you are instrumenting a rack
         #   middleware call.  The <tt>:name</tt> is optional, useful if you
         #   have more than one potential transaction in the #call.
         # * <tt>:category => :uri</tt> indicates that this is a
@@ -229,8 +316,6 @@ module NewRelic
         #
         # Seldomly used options:
         #
-        # * <tt>:force => true</tt> indicates you should capture all
-        #   metrics even if the #newrelic_ignore directive was specified
         # * <tt>:class_name => aClass.name</tt> is used to override the name
         #   of the class when used inside the metric name.  Default is the
         #   current class.
@@ -240,54 +325,43 @@ module NewRelic
         # * <tt>:request => Rack::Request#new(env)</tt> is used to pass in a
         #   request object that may respond to uri and referer.
         #
-        # If a single argument is passed in, it is treated as a metric
-        # path.  This form is deprecated.
-        def perform_action_with_newrelic_trace(*args, &block)
-          request = newrelic_request(args)
-          NewRelic::Agent::TransactionInfo.reset(request)
+        # @api public
+        #
+        def perform_action_with_newrelic_trace(*args, &block) #THREAD_LOCAL_ACCESS
+          state = NewRelic::Agent::TransactionState.tl_get
+          state.request = newrelic_request(args)
 
-          # Skip instrumentation based on the value of 'do_not_trace' and if
-          # we aren't calling directly with a block.
-          if !block_given? && do_not_trace?
-            # Also ignore all instrumentation in the call sequence
-            NewRelic::Agent.disable_all_tracing do
-              return perform_action_without_newrelic_trace(*args)
-            end
+          skip_tracing = do_not_trace? || !state.is_execution_traced?
+
+          if skip_tracing
+            state.current_transaction.ignore! if state.current_transaction
+            NewRelic::Agent.disable_all_tracing { return yield }
           end
-          
-          control = NewRelic::Control.instance
-          return perform_action_with_newrelic_profile(args, &block) if control.profiling?
 
-          frame_data = _push_metric_frame(block_given? ? args : [])
+          # This method has traditionally taken a variable number of arguments, but the
+          # only one that is expected / used is a single options hash.  We are preserving
+          # the *args method signature to ensure backwards compatibility.
+
+          trace_options = args.last.is_a?(Hash) ? args.last : NR_DEFAULT_OPTIONS
+          category      = trace_options[:category] || :controller
+          txn_options   = create_transaction_options(trace_options, category, state)
+
           begin
-            NewRelic::Agent.trace_execution_scoped frame_data.recorded_metrics, :force => frame_data.force_flag do
-              frame_data.start_transaction
-              begin
-                NewRelic::Agent::BusyCalculator.dispatcher_start frame_data.start
-                result = if block_given?
-                  yield
-                else
-                  perform_action_without_newrelic_trace(*args)
-                end
-                if defined?(request) && request && defined?(response) && response
-                  if !Agent.config[:disable_mobile_headers]
-                    NewRelic::Agent::BrowserMonitoring.insert_mobile_response_header(request, response)
-                  end
-                end
-                result
-              rescue => e
-                frame_data.notice_error(e)
-                raise
-              end
+            txn = Transaction.start(state, category, txn_options)
+
+            begin
+              yield
+            rescue => e
+              NewRelic::Agent.notice_error(e)
+              raise
             end
+
           ensure
-            NewRelic::Agent::BusyCalculator.dispatcher_finish
-            # Look for a metric frame in the thread local and process it.
-            # Clear the thread local when finished to ensure it only gets called once.
-            frame_data.record_apdex unless ignore_apdex?
-            frame_data.pop
-            
-            NewRelic::Agent::TransactionInfo.get.ignore_end_user = true if ignore_enduser?
+            if txn
+              txn.ignore_apdex!   if ignore_apdex?
+              txn.ignore_enduser! if ignore_enduser?
+            end
+            Transaction.stop(state)
           end
         end
 
@@ -298,10 +372,6 @@ module NewRelic
           # passed as a parameter to add_transaction_tracer
           if opts.respond_to?(:keys) && opts.respond_to?(:[]) && opts[:request]
             opts[:request]
-          # in a Rack app
-          elsif opts.respond_to?(:keys) && opts.respond_to?(:[]) &&
-              opts['rack.version']
-            Rack::Request.new(args)
           # in a Rails app
           elsif self.respond_to?(:request)
             self.request
@@ -311,155 +381,69 @@ module NewRelic
         # Should be implemented in the dispatcher class
         def newrelic_response_code; end
 
-        def newrelic_request_headers
-          self.respond_to?(:request) && self.request.respond_to?(:headers) && self.request.headers
+        def newrelic_request_headers(state)
+          request = state.request
+          if request
+            if request.respond_to?(:headers)
+              request.headers
+            elsif request.respond_to?(:env)
+              request.env
+            end
+          end
         end
-        
+
         # overrideable method to determine whether to trace an action
         # or not - you may override this in your controller and supply
         # your own logic for ignoring transactions.
         def do_not_trace?
-          _is_filtered?('do_not_trace')
+          _is_filtered?(NR_DO_NOT_TRACE_KEY)
         end
-        
+
         # overrideable method to determine whether to trace an action
         # for purposes of apdex measurement - you can use this to
         # ignore things like api calls or other fast non-user-facing
         # actions
         def ignore_apdex?
-          _is_filtered?('ignore_apdex')
+          _is_filtered?(NR_IGNORE_APDEX_KEY)
         end
-        
+
         def ignore_enduser?
-          _is_filtered?('ignore_enduser')
+          _is_filtered?(NR_IGNORE_ENDUSER_KEY)
         end
 
         private
 
-        # Profile the instrumented call.  Dev mode only.  Experimental
-        # - should definitely not be used on production applications
-        def perform_action_with_newrelic_profile(args)
-          frame_data = _push_metric_frame(block_given? ? args : [])
-          val = nil
-          NewRelic::Agent.trace_execution_scoped frame_data.metric_name do
-            MetricFrame.current(true).start_transaction
-            NewRelic::Agent.disable_all_tracing do
-              # turn on profiling
-              profile = RubyProf.profile do
-                if block_given?
-                  val = yield
-                else
-                  val = perform_action_without_newrelic_trace(*args)
-                end
-              end
-              NewRelic::Agent.instance.transaction_sampler.notice_profile profile
-            end
-          end
-          return val
-        ensure
-          frame_data.pop
-        end
-
-        # Write a metric frame onto a thread local if there isn't already one there.
-        # If there is one, just update it.
-        def _push_metric_frame(args) # :nodoc:
-          frame_data = NewRelic::Agent::Instrumentation::MetricFrame.current(true)
-
-          frame_data.apdex_start ||= _detect_upstream_wait(frame_data.start)
-          _record_queue_length
-          # If a block was passed in, then the arguments represent options for the instrumentation,
-          # not app method arguments.
-          if args.any?
-            if args.last.is_a?(Hash)
-              options = args.last
-              frame_data.force_flag = options[:force]
-              frame_data.request = options[:request] if options[:request]
-            end
-            category, path, available_params = _convert_args_to_path(args)
-          else
-            category = 'Controller'
-            path = newrelic_metric_path
-            available_params = self.respond_to?(:params) ? self.params : {}
-          end
-          frame_data.request ||= self.request if self.respond_to? :request
-          transaction_name = category + '/' + path
-          frame_data.push(transaction_name)
-          NewRelic::Agent::TransactionInfo.get.transaction_name = transaction_name
-          frame_data.filtered_params = (respond_to? :filter_parameters) ? filter_parameters(available_params) : available_params
-          frame_data
-        end
-
-        def _convert_args_to_path(args)
-          options =  args.last.is_a?(Hash) ? args.pop : {}
-          params = options[:params] || {}
-          category = case options[:category]
-                     when :controller, nil then 'Controller'
-                     when :task then 'OtherTransaction/Background' # 'Task'
-                     when :rack then 'Controller/Rack' #'WebTransaction/Rack'
-                     when :uri then 'Controller' #'WebTransaction/Uri'
-                     when :sinatra then 'Controller/Sinatra' #'WebTransaction/Uri'
-                       # for internal use only
-                     else options[:category].to_s
-                     end
-          unless path = options[:path]
-            action = options[:name] || args.first
-            metric_class = options[:class_name] || ((self.is_a?(Class)||self.is_a?(Module)) ? self.name : self.class.name)
-            path = metric_class
-            path += ('/' + action) if action
-          end
-          [category, path, params]
+        def create_transaction_options(trace_options, category, state)
+          txn_options = {}
+          txn_options[:request]   = trace_options[:request]
+          txn_options[:request] ||= request if respond_to?(:request)
+          # params should have been filtered before calling perform_action_with_newrelic_trace
+          txn_options[:filtered_params] = trace_options[:params]
+          txn_options[:transaction_name] = TransactionNamer.name_for(nil, self, category, trace_options)
+          txn_options[:apdex_start_time] = detect_queue_start_time(state)
+          txn_options
         end
 
         # Filter out a request if it matches one of our parameters for
-        # ignoring it - the key is either 'do_not_trace' or 'ignore_apdex'
+        # ignoring it - the key is either NR_DO_NOT_TRACE_KEY or NR_IGNORE_APDEX_KEY
         def _is_filtered?(key)
-          ignore_actions = self.class.newrelic_read_attr(key) if self.class.respond_to? :newrelic_read_attr
-          case ignore_actions
-          when nil; false
-          when Hash
-            only_actions = Array(ignore_actions[:only])
-            except_actions = Array(ignore_actions[:except])
-            only_actions.include?(action_name.to_sym) || (except_actions.any? && !except_actions.include?(action_name.to_sym))
+          name = if respond_to?(:action_name)
+            action_name
           else
-            true
+            :'[action_name_missing]'
           end
-        end
-        # Take a guess at a measure representing the number of requests waiting in mongrel
-        # or heroku.
-        def _record_queue_length
-          if newrelic_request_headers
-            if queue_depth = newrelic_request_headers['HTTP_X_HEROKU_QUEUE_DEPTH']
-              queue_depth = queue_depth.to_i rescue nil
-            elsif mongrel = NewRelic::Control.instance.local_env.mongrel
-              # Always subtrace 1 for the active mongrel
-              queue_depth = [mongrel.workers.list.length.to_i - 1, 0].max rescue nil
-            end
-            NewRelic::Agent.agent.stats_engine.get_stats_no_scope('Mongrel/Queue Length').trace_call(queue_depth) if queue_depth
-          end
+
+          NewRelic::Agent::Instrumentation::IgnoreActions.is_filtered?(
+            key,
+            self.class,
+            name)
         end
 
-        include NewRelic::Agent::Instrumentation::QueueTime
+        def detect_queue_start_time(state)
+          headers = newrelic_request_headers(state)
 
-        # Return a Time instance representing the upstream start time.
-        # now is a Time instance to fall back on if no other candidate
-        # for the start time is found.
-        def _detect_upstream_wait(now)
-          queue_start = nil
-          if newrelic_request_headers
-            queue_start = parse_frontend_headers(newrelic_request_headers)
-          end
-          queue_start || now
-        rescue => e
-          ::NewRelic::Agent.logger.error("Error detecting upstream wait time:", e)
-          now
+          QueueTime.parse_frontend_timestamp(headers) if headers
         end
-        
-        # returns the NewRelic::MethodTraceStats object associated
-        # with the dispatcher time measurement
-        def _dispatch_stat
-          NewRelic::Agent.agent.stats_engine.get_stats_no_scope 'HttpDispatcher'
-        end
-
       end
     end
   end

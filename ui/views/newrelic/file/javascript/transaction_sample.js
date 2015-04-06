@@ -1,3 +1,6 @@
+// This file is distributed under New Relic's license terms.
+// See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 function show_request_params()
 {
   $('#params_link').hide();
@@ -5,9 +8,9 @@ function show_request_params()
 }
 
 function show_view(page_id){
-  $('#show_sample_summary, #show_sample_sql, #show_sample_detail').hide();  
+  $('#show_sample_summary, #show_sample_sql, #show_sample_detail').hide();
   $('#' + page_id).show();
-} 
+}
 
 function toggle_row_class(theLink)
 {

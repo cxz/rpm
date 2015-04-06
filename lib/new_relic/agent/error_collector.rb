@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic
   module Agent
     # This class collects errors from the parent application, storing
@@ -21,11 +25,9 @@ module NewRelic
       # Returns a new error collector
       def initialize
         @errors = []
-        @seen_error_ids = []
 
         # lookup of exception class names to ignore.  Hash for fast access
         @ignore = {}
-        @capture_source = Agent.config[:'error_collector.capture_source']
 
         initialize_ignored_errors(Agent.config[:'error_collector.ignore_errors'])
         @lock = Mutex.new
@@ -37,7 +39,7 @@ module NewRelic
           initialize_ignored_errors(ignore_errors)
         end
       end
-      
+
       def initialize_ignored_errors(ignore_errors)
         @ignore.clear
         ignore_errors = ignore_errors.split(",") if ignore_errors.is_a? String
@@ -49,18 +51,37 @@ module NewRelic
         Agent.config[:'error_collector.enabled']
       end
 
-      # Returns the error filter proc that is used to check if an
-      # error should be reported. When given a block, resets the
-      # filter to the provided block.  The define_method() is used to
-      # wrap the block in a lambda so return statements don't result in a
-      # LocalJump exception.
-      def ignore_error_filter(&block)
+      def disabled?
+        !enabled?
+      end
+
+      # We store the passed block in both an ivar on the class, and implicitly
+      # within the body of the ignore_filter_proc method intentionally here.
+      # The define_method trick is needed to get around the fact that users may
+      # call 'return' from within their filter blocks, which would otherwise
+      # result in a LocalJumpError.
+      #
+      # The raw block is also stored in an instance variable so that we can
+      # return it later in its original form.
+      #
+      # This is all done at the class level in order to avoid the case where
+      # the user sets up an ignore filter on one instance of the ErrorCollector,
+      # and then that instance subsequently gets discarded during agent startup.
+      # (For example, if the agent is initially disabled, and then gets enabled
+      # via a call to manual_start later on.)
+      #
+      def self.ignore_error_filter=(block)
+        @ignore_filter = block
         if block
-          self.class.class_eval { define_method(:ignore_filter_proc, &block) }
-          @ignore_filter = method(:ignore_filter_proc)
-        else
-          @ignore_filter
+          define_method(:ignore_filter_proc, &block)
+        elsif method_defined?(:ignore_filter_proc)
+          undef :ignore_filter_proc
         end
+        @ignore_filter
+      end
+
+      def self.ignore_error_filter
+        @ignore_filter
       end
 
       # errors is an array of Exception Class Names
@@ -78,8 +99,7 @@ module NewRelic
         # Checks the provided error against the error filter, if there
         # is an error filter
         def filtered_by_error_filter?(error)
-          return unless @ignore_filter
-          !@ignore_filter.call(error)
+          respond_to?(:ignore_filter_proc) && !ignore_filter_proc(error)
         end
 
         # Checks the array of error names and the error filter against
@@ -91,29 +111,61 @@ module NewRelic
         # an error is ignored if it is nil or if it is filtered
         def error_is_ignored?(error)
           error && filtered_error?(error)
+        rescue => e
+          NewRelic::Agent.logger.error("Error '#{error}' will NOT be ignored. Exception '#{e}' while determining whether to ignore or not.", e)
+          false
+        end
+
+        def seen?(txn, exception)
+          error_ids = txn.nil? ? [] : txn.noticed_error_ids
+          error_ids.include?(exception.object_id)
+        end
+
+        def tag_as_seen(state, exception)
+          txn = state.current_transaction
+          txn.noticed_error_ids << exception.object_id if txn
+        end
+
+        def blamed_metric_name(txn, options)
+          if options[:metric] && options[:metric] != ::NewRelic::Agent::UNKNOWN_METRIC
+            "Errors/#{options[:metric]}"
+          else
+            "Errors/#{txn.best_name}" if txn
+          end
+        end
+
+        def aggregated_metric_names(txn)
+          metric_names = ["Errors/all"]
+          return metric_names unless txn
+
+          if txn.recording_web_transaction?
+            metric_names << "Errors/allWeb"
+          else
+            metric_names << "Errors/allOther"
+          end
+
+          metric_names
         end
 
         # Increments a statistic that tracks total error rate
-        # Be sure not to double-count same exception. This clears per harvest.
-        def increment_error_count!(exception)
-          return if @seen_error_ids.include?(exception.object_id)
-          @seen_error_ids << exception.object_id
+        def increment_error_count!(state, exception, options={})
+          txn = state.current_transaction
 
-          NewRelic::Agent.get_stats("Errors/all").increment_count
+          metric_names  = aggregated_metric_names(txn)
+          blamed_metric = blamed_metric_name(txn, options)
+          metric_names << blamed_metric if blamed_metric
+
+          stats_engine = NewRelic::Agent.agent.stats_engine
+          stats_engine.record_unscoped_metrics(state, metric_names) do |stats|
+            stats.increment_count
+          end
         end
 
-        # whether we should return early from the notice_error process
-        # - based on whether the error is ignored or the error
-        # collector is disabled
-        def should_exit_notice_error?(exception)
-          if enabled?
-            if !error_is_ignored?(exception)
-              increment_error_count!(exception)
-              return exception.nil? # exit early if the exception is nil
-            end
-          end
-          # disabled or an ignored error, per above
-          true
+        def skip_notice_error?(state, exception)
+          disabled? ||
+            error_is_ignored?(exception) ||
+            exception.nil? ||
+            seen?(state.current_transaction, exception)
         end
 
         # acts just like Hash#fetch, but deletes the key from the hash
@@ -134,7 +186,11 @@ module NewRelic
         # If anything else is left over, we treat it like a custom param
         def custom_params_from_opts(options)
           # If anything else is left over, treat it like a custom param:
-          fetch_from_options(options, :custom_params, {}).merge(options)
+          if Agent.config[:'error_collector.capture_attributes']
+            fetch_from_options(options, :custom_params, {}).merge(options)
+          else
+            {}
+          end
         end
 
         # takes the request parameters out of the options hash, and
@@ -171,12 +227,6 @@ module NewRelic
           object.send(method) if object.respond_to?(method)
         end
 
-        # extracts source from the exception, if the exception supports
-        # that method
-        def extract_source(exception)
-          sense_method(exception, 'source_extract') if @capture_source
-        end
-
         # extracts a stack trace from the exception for debugging purposes
         def extract_stack_trace(exception)
           actual_exception = sense_method(exception, 'original_exception') || exception
@@ -190,7 +240,6 @@ module NewRelic
           {
             :file_name => sense_method(exception, 'file_name'),
             :line_number => sense_method(exception, 'line_number'),
-            :source => extract_source(exception),
             :stack_trace => extract_stack_trace(exception)
           }
         end
@@ -198,7 +247,7 @@ module NewRelic
         # checks the size of the error queue to make sure we are under
         # the maximum limit, and logs a warning if we are over the limit.
         def over_queue_limit?(message)
-          over_limit = (@errors.length >= MAX_ERROR_QUEUE_LENGTH)
+          over_limit = (@errors.reject{|err| err.is_internal}.length >= MAX_ERROR_QUEUE_LENGTH)
           ::NewRelic::Agent.logger.warn("The error reporting queue has reached #{MAX_ERROR_QUEUE_LENGTH}. The error detail for this and subsequent errors will not be transmitted to New Relic until the queued errors have been sent: #{message}") if over_limit
           over_limit
         end
@@ -228,32 +277,72 @@ module NewRelic
       #
       # If anything is left over, it's added to custom params
       # If exception is nil, the error count is bumped and no traced error is recorded
-      def notice_error(exception, options={})
-        return if should_exit_notice_error?(exception)
+      def notice_error(exception, options={}) #THREAD_LOCAL_ACCESS
+        state = ::NewRelic::Agent::TransactionState.tl_get
+
+        return if skip_notice_error?(state, exception)
+        tag_as_seen(state, exception)
+
+        increment_error_count!(state, exception, options)
         NewRelic::Agent.instance.events.notify(:notice_error, exception, options)
-        action_path     = fetch_from_options(options, :metric, (NewRelic::Agent.instance.stats_engine.scope_name || ''))
+
+        action_path       = fetch_from_options(options, :metric, "")
         exception_options = error_params_from_options(options).merge(exception_info(exception))
         add_to_error_queue(NewRelic::NoticedError.new(action_path, exception_options, exception))
+
         exception
       rescue => e
         ::NewRelic::Agent.logger.warn("Failure when capturing error '#{exception}':", e)
       end
 
+      # *Use sparingly for difficult to track bugs.*
+      #
+      # Track internal agent errors for communication back to New Relic.
+      # To use, make a specific subclass of NewRelic::Agent::InternalAgentError,
+      # then pass an instance of it to this method when your problem occurs.
+      #
+      # Limits are treated differently for these errors. We only gather one per
+      # class per harvest, disregarding (and not impacting) the app error queue
+      # limit.
+      def notice_agent_error(exception)
+        return unless exception.class < NewRelic::Agent::InternalAgentError
+
+        # Log 'em all!
+        NewRelic::Agent.logger.info(exception)
+
+        @lock.synchronize do
+          # Already seen this class once? Bail!
+          return if @errors.any? { |err| err.exception_class_name == exception.class.name }
+
+          trace = exception.backtrace || caller.dup
+          noticed_error = NewRelic::NoticedError.new("NewRelic/AgentError",
+                                                     {:stack_trace => trace},
+                                                     exception)
+          @errors << noticed_error
+        end
+      rescue => e
+        NewRelic::Agent.logger.info("Unable to capture internal agent error due to an exception:", e)
+      end
+
+      def merge!(errors)
+        errors.each do |error|
+          add_to_error_queue(error)
+        end
+      end
+
       # Get the errors currently queued up.  Unsent errors are left
       # over from a previous unsuccessful attempt to send them to the server.
-      def harvest_errors(unsent_errors)
+      def harvest!
         @lock.synchronize do
           errors = @errors
           @errors = []
-
-          # Only expect to re-see errors on same request, so clear on harvest
-          @seen_error_ids = []
-
-          if unsent_errors && !unsent_errors.empty?
-            errors = unsent_errors + errors
-          end
-
           errors
+        end
+      end
+
+      def reset!
+        @lock.synchronize do
+          @errors = []
         end
       end
     end

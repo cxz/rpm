@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'pathname'
 require File.expand_path('../google_pie_chart', __FILE__)
 require 'new_relic/collection_helper'
@@ -16,18 +20,12 @@ module NewRelic::DeveloperModeHelper
    (!@detail_segment_count.nil? && @detail_segment_count > trace_row_display_limit) || @sample.sql_segments.length > trace_row_display_limit
   end
 
-  # return the sample but post processed to strip out segments that normally don't show
-  # up in production (after the first execution, at least) such as application code loading
-  def stripped_sample(sample = @sample)
-    sample.omit_segments_with('(Rails/Application Code Loading)|(Database/.*/.+ Columns)')
-  end
-
   # return the highest level in the call stack for the trace that is not rails or
   # newrelic agent code
   def application_caller(trace)
     trace = strip_nr_from_backtrace(trace) unless params[:show_nr]
     trace.each do |trace_line|
-      file, line, gem = file_and_line(trace_line)
+      file, _line, gem = file_and_line(trace_line)
       unless file && exclude_file_from_stack_trace?(file, false, gem)
         return trace_line
       end
@@ -38,7 +36,7 @@ module NewRelic::DeveloperModeHelper
   def application_stack_trace(trace, include_rails = false)
     trace = strip_nr_from_backtrace(trace) unless params[:show_nr]
     trace.reject do |trace_line|
-      file, line, gem = file_and_line(trace_line)
+      file, _line, gem = file_and_line(trace_line)
       file && exclude_file_from_stack_trace?(file, include_rails, gem)
     end
   end
@@ -58,40 +56,13 @@ module NewRelic::DeveloperModeHelper
     path
   end
 
-  def url_for_source(trace_line)
-    file, line = file_and_line(trace_line)
-    return "#" if file.nil?
-    begin
-      file = Pathname.new(file).realpath
-    rescue Errno::ENOENT
-      # we hit this exception when Pathame.realpath fails for some reason; attempt a link to
-      # the file without a real path.  It may also fail, only when the user clicks on this specific
-      # entry in the stack trace
-    rescue
-      # catch all other exceptions.  We're going to create an invalid link below, but that's okay.
-    end
-    if NewRelic::Agent.config[:textmate]
-      "txmt://open?url=file://#{file}&line=#{line}"
-    else
-      "show_source?file=#{file}&amp;line=#{line}&amp;anchor=selected_line"
-    end
-  end
-
   def dev_name(metric_name)
     NewRelic::MetricParser::MetricParser.parse(metric_name).developer_name
   end
 
   # write the metric label for a segment metric in the detail view
   def write_segment_label(segment)
-    if source_available && segment[:backtrace] && (source_url = url_for_source(application_caller(segment[:backtrace])))
-      link_to dev_name(segment.metric_name), source_url
-    else
-      dev_name(segment.metric_name)
-    end
-  end
-
-  def source_available
-    true
+    link_to_function(dev_name(segment.metric_name), "toggle_row_class($(this).closest('td').find('a')[0])")
   end
 
   # write the metric label for a segment metric in the summary table of metrics
@@ -100,14 +71,7 @@ module NewRelic::DeveloperModeHelper
   end
 
   def write_stack_trace_line(trace_line)
-    link_to trace_line, url_for_source(trace_line)
-  end
-
-  # write a link to the source for a trace
-  def link_to_source(trace)
-    image_url = 'file/images/' + (NewRelic::Agent.config[:textmate] ? "textmate.png" : "file_icon.png")
-
-    link_to "<img src=#{image_url} alt=\"View Source\" title=\"View Source\"/>", url_for_source(application_caller(trace))
+    trace_line
   end
 
   # print the formatted timestamp for a segment
@@ -167,7 +131,7 @@ module NewRelic::DeveloperModeHelper
     if depth > 0
       if !segment.called_segments.empty?
         row_class =segment_child_row_class(segment)
-        link_to_function("<img src=\"#{collapsed_image_path}\" id=\"image_#{row_class}\" class_for_children=\"#{row_class}\" class=\"#{(!segment.called_segments.empty?) ? 'parent_segment_image' : 'child_segment_image'}\"", "toggle_row_class(this)")
+        link_to_function("<img src=\"#{collapsed_image_path}\" id=\"image_#{row_class}\" class_for_children=\"#{row_class}\" class=\"#{(!segment.called_segments.empty?) ? 'parent_segment_image' : 'child_segment_image'}\" />", "toggle_row_class(this)")
       end
     end
   end
@@ -229,7 +193,7 @@ module NewRelic::DeveloperModeHelper
   end
 
   private
-  # return three objects, the file path, the line in the file, and the gem the file belongs to 
+  # return three objects, the file path, the line in the file, and the gem the file belongs to
   # if found
   def file_and_line(stack_trace_line)
     if stack_trace_line =~ /^(?:(\w+) \([\d.]*\) )?(.*):(\d+)/

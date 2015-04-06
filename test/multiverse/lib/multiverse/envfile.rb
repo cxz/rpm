@@ -1,9 +1,13 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module Multiverse
   # Reads an envfile.rb and converts it into gemfiles that can be used by
   # bundler
   class Envfile
-    attr_accessor :file_path, :condition, :newrelic_gemfile_options
-    attr_reader :before, :after, :mode, :skip_message
+    attr_accessor :file_path, :condition
+    attr_reader :before, :after, :mode, :skip_message, :omit_collector
 
     def initialize(file_path)
       self.file_path = file_path
@@ -21,16 +25,12 @@ module Multiverse
       @condition = block
     end
 
-    # string representation options hash to append to the newrelic_rpm line
-    # when setting up Gemfile
-    # e.g. ":require => false"
-    def newrelic_gemfile_options=(options_string)
-      @newrelic_gemfile_options = options_string
-    end
-
-
     def gemfile(content)
       @gemfiles.push content
+    end
+
+    def omit_collector!
+      @omit_collector = true
     end
 
     def before_suite(&block)

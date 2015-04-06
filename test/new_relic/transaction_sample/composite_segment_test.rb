@@ -1,6 +1,10 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'test_helper'))
 require 'new_relic/transaction_sample/composite_segment'
-class NewRelic::TransactionSample::CompositeSegmentTest < Test::Unit::TestCase
+class NewRelic::TransactionSample::CompositeSegmentTest < Minitest::Test
   def test_composite_segment_creation
     fake_segment = mock_segment
     NewRelic::TransactionSample::CompositeSegment.new([fake_segment])
@@ -32,4 +36,3 @@ class NewRelic::TransactionSample::CompositeSegmentTest < Test::Unit::TestCase
     segment
   end
 end
-

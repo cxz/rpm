@@ -1,7 +1,11 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..', 'test_helper'))
 
 # Test logic around detecting or configuring framework
-class FrameworkTest < Test::Unit::TestCase
+class FrameworkTest < Minitest::Test
 
   def setup
 
@@ -21,6 +25,7 @@ class FrameworkTest < Test::Unit::TestCase
   def teardown
     # Put things back how we found them
     ::NewRelic.send(:const_set, :TEST,  @old_newrelic_test_const)
+    NewRelic::Agent.reset_config
   end
 
   def test_detects_framework_via_loaded_libraries

@@ -1,12 +1,16 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'logger'
 require 'fileutils'
+require 'new_relic/agent/hostname'
 
 module NewRelic
   module Agent
     class AuditLogger
-      def initialize(config)
-        @config = config
-        @enabled = @config[:'audit_log.enabled']
+      def initialize
+        @enabled = NewRelic::Agent.config[:'audit_log.enabled']
         @encoder = NewRelic::Agent::NewRelicService::Encoders::Identity
       end
 
@@ -31,19 +35,26 @@ module NewRelic
           @log.info("REQUEST: #{uri}")
           @log.info("REQUEST BODY: #{request_body}")
         end
-      rescue SystemCallError => e
-        ::NewRelic::Agent.logger.warn("Failed writing to audit log: #{e}")
+      rescue StandardError, SystemStackError, SystemCallError => e
+        ::NewRelic::Agent.logger.warn("Failed writing to audit log", e)
+      rescue Exception => e
+        ::NewRelic::Agent.logger.warn("Failed writing to audit log with exception. Re-raising in case of interupt.", e)
+        raise
       end
 
       def setup_logger
         path = ensure_log_path
-        @log = ::Logger.new(path || "/dev/null")
-        @log.formatter = log_formatter
-        ::NewRelic::Agent.logger.info("Audit log enabled at '#{path}'") if path
+        if path
+          @log = ::Logger.new(path)
+          @log.formatter = create_log_formatter
+          ::NewRelic::Agent.logger.info("Audit log enabled at '#{path}'")
+        else
+          @log = NewRelic::Agent::NullLogger.new
+        end
       end
 
       def ensure_log_path
-        path = File.expand_path(@config[:'audit_log.path'])
+        path = File.expand_path(NewRelic::Agent.config[:'audit_log.path'])
         log_dir = File.dirname(path)
 
         begin
@@ -58,14 +69,11 @@ module NewRelic
         path
       end
 
-      def log_formatter
-        if @formatter.nil?
-          @formatter = Logger::Formatter.new
-          def @formatter.call(severity, time, progname, msg)
-            "[#{time} #{Socket.gethostname} (#{$$})] : #{msg}\n"
-          end
+      def create_log_formatter
+        @hostname = NewRelic::Agent::Hostname.get
+        Proc.new do |severity, time, progname, msg|
+          "[#{time} #{@hostname} (#{$$})] : #{msg}\n"
         end
-        @formatter
       end
     end
   end

@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'new_relic/control/frameworks/ruby'
 module NewRelic
   class Control
@@ -45,8 +49,7 @@ module NewRelic
           if rails_config && ::Rails.configuration.respond_to?(:after_initialize)
             rails_config.after_initialize do
               # This will insure we load all the instrumentation as late as possible.  If the agent
-              # is not enabled, it will load a limited amount of instrumentation.  See
-              # delayed_job_injection.rb
+              # is not enabled, it will load a limited amount of instrumentation.
               DependencyDetection.detect!
             end
           end
@@ -55,7 +58,6 @@ module NewRelic
             # is running, if it thinks it's a rake task, or if the agent_enabled is false.
             ::NewRelic::Agent.logger.info("New Relic Agent not running.")
           else
-            ::NewRelic::Agent.logger.info("Starting the New Relic Agent.")
             install_developer_mode(rails_config) if Agent.config[:developer_mode]
             install_browser_monitoring(rails_config)
             install_agent_hooks(rails_config)
@@ -68,6 +70,7 @@ module NewRelic
           return if config.nil? || !config.respond_to?(:middleware)
           begin
             require 'new_relic/rack/agent_hooks'
+            return unless NewRelic::Rack::AgentHooks.needed?
             config.middleware.use NewRelic::Rack::AgentHooks
             ::NewRelic::Agent.logger.debug("Installed New Relic Agent Hooks middleware")
           rescue => e
@@ -95,13 +98,9 @@ module NewRelic
             begin
               require 'new_relic/rack/developer_mode'
               rails_config.middleware.use NewRelic::Rack::DeveloperMode
-
-              # inform user that the dev edition is available if we are running inside
-              # a webserver process
-              if @local_env.dispatcher_instance_id
-                port = @local_env.dispatcher_instance_id.to_s =~ /^\d+/ ? ":#{local_env.dispatcher_instance_id}" : ":port"
-                ::NewRelic::Agent.logger.debug("NewRelic Agent Developer Mode enabled.")
-                ::NewRelic::Agent.logger.debug("To view performance information, go to http://localhost#{port}/newrelic")
+              ::NewRelic::Agent.logger.info("New Relic Agent Developer Mode enabled.")
+              if env == "production"
+                ::NewRelic::Agent.logger.warn("***New Relic Developer Mode is not intended to be enabled in production environments! We highly recommend setting developer_mode: false for the production environment in your newrelic.yml.")
               end
             rescue => e
               ::NewRelic::Agent.logger.warn("Error installing New Relic Developer Mode", e)
@@ -119,43 +118,6 @@ module NewRelic
 
         def rails_vendor_root
           File.join(root,'vendor','rails')
-        end
-
-        def rails_gem_list
-          ::Rails.configuration.gems.map do |gem|
-            version = (gem.respond_to?(:version) && gem.version) ||
-              (gem.specification.respond_to?(:version) && gem.specification.version)
-            gem.name + (version ? "(#{version})" : "")
-          end
-        end
-
-        # Collect the Rails::Info into an associative array as well as the list of plugins
-        def append_environment_info
-          local_env.append_environment_value('Rails version'){ ::Rails::VERSION::STRING }
-          if rails_version >= NewRelic::VersionNumber.new('2.2.0')
-            local_env.append_environment_value('Rails threadsafe') do
-              ::Rails.configuration.action_controller.allow_concurrency == true
-            end
-          end
-          local_env.append_environment_value('Rails Env') { ENV['RAILS_ENV'] }
-          if rails_version >= NewRelic::VersionNumber.new('2.1.0')
-            local_env.append_gem_list do
-              (bundler_gem_list + rails_gem_list).uniq
-            end
-            # The plugins is configured manually.  If it's nil, it loads everything non-deterministically
-            if ::Rails.configuration.plugins
-              local_env.append_plugin_list { ::Rails.configuration.plugins }
-            else
-              ::Rails.configuration.plugin_paths.each do |path|
-                local_env.append_plugin_list { Dir[File.join(path, '*')].collect{ |p| File.basename p if File.directory? p }.compact }
-              end
-            end
-          else
-            # Rails prior to 2.1, can't get the gems.  Find plugins in the default location
-            local_env.append_plugin_list do
-              Dir[File.join(root, 'vendor', 'plugins', '*')].collect{ |p| File.basename p if File.directory? p }.compact
-            end
-          end
         end
 
         def install_shim

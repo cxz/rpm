@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'new_relic/control/frameworks/rails3'
 require 'new_relic/rack/error_collector'
 module NewRelic
@@ -8,10 +12,6 @@ module NewRelic
           Bundler.rubygems.all_specs.map do |gem|
             "#{gem.name} (#{gem.version})"
           end
-        end
-
-        def add_error_collector_middleware
-          # rails_config.middleware.use NewRelic::Rack::ErrorCollector
         end
 
         def append_plugin_list

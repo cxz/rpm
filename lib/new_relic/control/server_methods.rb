@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic
   class Control
 
@@ -48,7 +52,9 @@ module NewRelic
       def convert_to_ip_address(host)
         # here we leave it as a host name since the cert verification
         # needs it in host form
-        return host if Agent.config[:ssl] && Agent.config[:verify_certificate]
+        return host if Agent.config[:ssl]
+        # We won't talk directly to the host, so no need to resolve if proxy configured
+        return host if Agent.config[:proxy_host]
         return nil if host.nil? || host.downcase == "localhost"
         ip = resolve_ip_address(host)
 
@@ -77,4 +83,3 @@ module NewRelic
     include ServerMethods
   end
 end
-

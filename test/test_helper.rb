@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic; TEST = true; end unless defined? NewRelic::TEST
 ENV['RAILS_ENV'] = 'test'
 NEWRELIC_PLUGIN_DIR = File.expand_path(File.join(File.dirname(__FILE__),".."))
@@ -10,47 +14,89 @@ $LOAD_PATH.uniq!
 
 require 'rubygems'
 require 'rake'
+
+require 'minitest/autorun'
+require 'mocha/setup'
+
+unless defined?(Minitest::Test)
+  Minitest::Test = MiniTest::Unit::TestCase
+end
+
+require 'hometown'
+Hometown.watch(::Thread)
+
+# Set up a watcher for leaking agent threads out of tests.  It'd be nice to
+# disable the threads everywhere, but not all tests have newrelic.yml loaded to
+# us to rely on, so instead we'll just watch for it.
+class Minitest::Test
+  def before_setup
+    @__thread_count = ruby_threads.count
+    super
+  end
+
+  def after_teardown
+    unfreeze_time
+
+    threads = ruby_threads
+    if @__thread_count != threads.count
+      backtraces = threads.map do |thread|
+        trace = Hometown.for(thread)
+        trace.backtrace.join("\n    ")
+      end.join("\n\n")
+
+      fail "Thread count changed in this test from #{@__thread_count} to #{threads.count}\n#{backtraces}"
+    end
+
+    super
+  end
+
+  # We only want to count threads that were spun up from Ruby (i.e.
+  # Thread.new) JRuby has system threads we don't care to track.
+  def ruby_threads
+    Thread.list.select { |t| Hometown.for(t) }
+  end
+end
+
+Dir.glob('test/helpers/*').each { |f| require f }
+
+Dir.glob(File.join(NEWRELIC_PLUGIN_DIR,'test/helpers/*.rb')).each do |helper|
+  require helper
+end
+
 # We can speed things up in tests that don't need to load rails.
 # You can also run the tests in a mode without rails.  Many tests
 # will be skipped.
-
-begin
-  require 'config/environment'
-#   require File.join(File.dirname(__FILE__),'..','..','rpm_test_app','config','environment')
+if ENV["NO_RAILS"]
+  puts "Running tests in standalone mode without Rails."
+  require 'newrelic_rpm'
+else
   begin
-    require 'test_help'
+    require 'config/environment'
+    require 'newrelic_rpm'
   rescue LoadError
-    # ignore load problems on test help - it doesn't exist in rails 3
-  end
-  require 'newrelic_rpm'
-rescue LoadError => e
-  puts "Running tests in standalone mode."
-  require 'bundler'
-  Bundler.require
-  require 'rails/all'
-  require 'newrelic_rpm'
+    puts "Running tests in standalone mode."
 
-  # Bootstrap a basic rails environment for the agent to run in.
-  class MyApp < Rails::Application
-    config.active_support.deprecation = :log
-    config.secret_token = "49837489qkuweoiuoqwehisuakshdjksadhaisdy78o34y138974xyqp9rmye8yrpiokeuioqwzyoiuxftoyqiuxrhm3iou1hrzmjk"
-    config.after_initialize do
-      NewRelic::Agent.manual_start
+    require 'bundler'
+    Bundler.require
+
+    require 'rails/all'
+    require 'newrelic_rpm'
+
+    # Bootstrap a basic rails environment for the agent to run in.
+    class MyApp < Rails::Application
+      config.active_support.deprecation = :log
+      config.secret_token = "49837489qkuweoiuoqwehisuakshdjksadhaisdy78o34y138974xyqp9rmye8yrpiokeuioqwzyoiuxftoyqiuxrhm3iou1hrzmjk"
+      config.after_initialize do
+        NewRelic::Agent.manual_start
+      end
     end
+    MyApp.initialize!
   end
-  MyApp.initialize!
-
 end
 
-require 'test/unit'
-require 'shoulda'
-require 'mocha'
-
-begin # 1.8.6
-  require 'mocha/integration/test_unit'
-  require 'mocha/integration/test_unit/assertion_counter'
-rescue LoadError
-end
+# This is the public method recommended for plugin developers to share our
+# agent helpers. Use it so we don't accidentally break it.
+NewRelic::Agent.require_test_helper
 
 def default_service(stubbed_method_overrides = {})
   service = stub
@@ -64,7 +110,12 @@ def default_service(stubbed_method_overrides = {})
     :metric_data => nil,
     :error_data => nil,
     :transaction_sample_data => nil,
-    :get_agent_commands => []
+    :sql_trace_data => nil,
+    :get_agent_commands => [],
+    :agent_command_results => nil,
+    :analytic_event_data => nil,
+    :utilization_data => nil,
+    :valid_to_marshal? => true
   }
 
   service.stubs(stubbed_method_defaults.merge(stubbed_method_overrides))
@@ -74,86 +125,17 @@ def default_service(stubbed_method_overrides = {})
   service
 end
 
-class Test::Unit::TestCase
-  include Mocha::API
+def with_verbose_logging
+  orig_logger = NewRelic::Agent.logger
+  $stderr.puts '', '---', ''
+  new_logger = NewRelic::Agent::AgentLogger.new('', Logger.new($stderr) )
+  NewRelic::Agent.logger = new_logger
 
-  # we can delete this trick when we stop supporting rails2.0.x
-  if ENV['BRANCH'] != 'rails20'
-    # a hack because rails2.0.2 does not like double teardowns
-    def teardown
-      mocha_teardown
-    end
-  end
-end
-
-def assert_between(floor, ceiling, value, message="expected #{floor} <= #{value} <= #{ceiling}")
-  assert((floor <= value && value <= ceiling), message)
-end
-
-def check_metric_time(metric, value, delta)
-  time = NewRelic::Agent.get_stats(metric).total_call_time
-  assert_between((value - delta), (value + delta), time)
-end
-
-def check_metric_count(metric, value)
-  count = NewRelic::Agent.get_stats(metric).call_count
-  assert_equal(value, count, "should have the correct number of calls")
-end
-
-def check_unscoped_metric_count(metric, value)
-  count = NewRelic::Agent.get_stats_unscoped(metric).call_count
-  assert_equal(value, count, "should have the correct number of calls")
-end
-
-def generate_unscoped_metric_counts(*metrics)
-  metrics.inject({}) do |sum, metric|
-    sum[metric] = NewRelic::Agent.get_stats_no_scope(metric).call_count
-    sum
-  end
-end
-
-def generate_metric_counts(*metrics)
-  metrics.inject({}) do |sum, metric|
-    sum[metric] = NewRelic::Agent.get_stats(metric).call_count
-    sum
-  end
-end
-
-def assert_does_not_call_metrics(*metrics)
-  first_metrics = generate_metric_counts(*metrics)
-  yield
-  last_metrics = generate_metric_counts(*metrics)
-  assert_equal first_metrics, last_metrics, "should not have changed these metrics"
-end
-
-def assert_calls_metrics(*metrics)
-  first_metrics = generate_metric_counts(*metrics)
-  yield
-  last_metrics = generate_metric_counts(*metrics)
-  assert_not_equal first_metrics, last_metrics, "should have changed these metrics"
-end
-
-def assert_calls_unscoped_metrics(*metrics)
-  first_metrics = generate_unscoped_metric_counts(*metrics)
-  yield
-  last_metrics = generate_unscoped_metric_counts(*metrics)
-  assert_not_equal first_metrics, last_metrics, "should have changed these metrics"
-end
-
-
-def compare_metrics(expected, actual)
-  actual.delete_if {|a| a.include?('GC/cumulative') } # in case we are in REE
-  assert_equal(expected.to_a.sort, actual.to_a.sort, "extra: #{(actual - expected).to_a.inspect}; missing: #{(expected - actual).to_a.inspect}")
-end
-
-def with_config(config_hash, level=0)
-  config = NewRelic::Agent::Configuration::DottedHash.new(config_hash)
-  NewRelic::Agent.config.apply_config(config, level)
-  begin
+  with_config(:log_level => 'debug') do
     yield
-  ensure
-    NewRelic::Agent.config.remove_config(config)
   end
+ensure
+  NewRelic::Agent.logger = orig_logger
 end
 
 # Need to be a bit sloppy when testing against the logging--let everything
@@ -177,46 +159,101 @@ ensure
   ::NewRelic::Agent.logger = logger
 end
 
-module NewRelic
-  def self.fixture_path(name)
-    File.join(File.dirname(__FILE__), 'fixtures', name)
+def fixture_tcp_socket( response )
+  # Don't actually talk to Google.
+  socket = stub("socket") do
+    stubs(:closed?).returns(false)
+    stubs(:close)
+    stubs(:setsockopt)
+
+    # Simulate a bunch of socket-ey stuff since Mocha doesn't really
+    # provide any other way to do it
+    class << self
+      attr_accessor :response, :write_checker
+    end
+
+    def self.check_write
+      self.write_checker = Proc.new
+    end
+
+    def self.write( buf )
+      self.write_checker.call( buf ) if self.write_checker
+      buf.length
+    end
+
+    def self.sysread( size, buf='' )
+      @data ||= response.to_s
+      raise EOFError if @data.empty?
+      buf.replace @data.slice!( 0, size )
+      buf
+    end
+    class << self
+      alias_method :read_nonblock, :sysread
+    end
+
   end
+
+  socket.response = response
+  TCPSocket.stubs( :open ).returns( socket )
+
+  return socket
+end
+
+def dummy_mysql_explain_result(hash=nil)
+  hash ||= {
+    'Id' => '1',
+    'Select Type' => 'SIMPLE',
+    'Table' => 'sandwiches',
+    'Type' => 'range',
+    'Possible Keys' => 'PRIMARY',
+    'Key' => 'PRIMARY',
+    'Key Length' => '4',
+    'Ref' => '',
+    'Rows' => '1',
+    'Extra' => 'Using index'
+  }
+  explain_result = mock('explain result')
+  explain_result.stubs(:each_hash).yields(hash)
+  explain_result
 end
 
 module TransactionSampleTestHelper
   module_function
   def make_sql_transaction(*sql)
-    sampler = NewRelic::Agent::TransactionSampler.new
-    sampler.notice_first_scope_push Time.now.to_f
-    sampler.notice_transaction '/path', nil, :jim => "cool"
-    sampler.notice_push_scope "a"
+    sampler = nil
+    state = NewRelic::Agent::TransactionState.tl_get
 
-    sampler.notice_transaction '/path/2', nil, :jim => "cool"
+    in_transaction('/path') do
+      sampler = NewRelic::Agent.instance.transaction_sampler
+      sampler.notice_push_frame(state, "a")
+      explainer = NewRelic::Agent::Instrumentation::ActiveRecord::EXPLAINER
+      sql.each {|sql_statement| sampler.notice_sql(sql_statement, {:adapter => "mysql"}, 0, state, &explainer) }
+      sleep 0.02
+      yield if block_given?
+      sampler.notice_pop_frame(state, "a")
+    end
 
-    sql.each {|sql_statement| sampler.notice_sql(sql_statement, {:adapter => "test"}, 0 ) }
-
-    sleep 0.02
-    yield if block_given?
-    sampler.notice_pop_scope "a"
-    sampler.notice_scope_empty
-
-    sampler.samples[0]
+    return sampler.last_sample
   end
 
-  def run_sample_trace_on(sampler, path='/path')
-    sampler.notice_first_scope_push Time.now.to_f
-    sampler.notice_transaction path, path, {}
-    sampler.notice_push_scope "Controller/sandwiches/index"
-    sampler.notice_sql("SELECT * FROM sandwiches WHERE bread = 'wheat'", nil, 0)
-    sampler.notice_push_scope "ab"
-    sampler.notice_sql("SELECT * FROM sandwiches WHERE bread = 'white'", nil, 0)
-    yield sampler if block_given?
-    sampler.notice_pop_scope "ab"
-    sampler.notice_push_scope "lew"
-    sampler.notice_sql("SELECT * FROM sandwiches WHERE bread = 'french'", nil, 0)
-    sampler.notice_pop_scope "lew"
-    sampler.notice_pop_scope "Controller/sandwiches/index"
-    sampler.notice_scope_empty
-    sampler.samples[0]
+  def run_sample_trace(path='/path')
+    sampler = nil
+    state = NewRelic::Agent::TransactionState.tl_get
+
+    request = stub(:uri => path)
+
+    in_transaction("Controller/sandwiches/index", :request => request) do
+      sampler = NewRelic::Agent.instance.transaction_sampler
+      sampler.notice_sql("SELECT * FROM sandwiches WHERE bread = 'wheat'", {}, 0, state)
+      sampler.notice_push_frame(state, "ab")
+      sampler.notice_sql("SELECT * FROM sandwiches WHERE bread = 'white'", {}, 0, state)
+      yield sampler if block_given?
+      sampler.notice_pop_frame(state, "ab")
+      sampler.notice_push_frame(state, "lew")
+      sampler.notice_sql("SELECT * FROM sandwiches WHERE bread = 'french'", {}, 0, state)
+      sampler.notice_pop_frame(state, "lew")
+    end
+
+    return sampler.last_sample
   end
 end

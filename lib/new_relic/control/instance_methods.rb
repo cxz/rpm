@@ -1,9 +1,13 @@
-require 'new_relic/language_support'
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
+require 'new_relic/agent/null_logger'
+require 'new_relic/agent/memory_logger'
 require 'new_relic/agent/agent_logger'
 
 module NewRelic
   class Control
-    include NewRelic::LanguageSupport::Control
 
     # Contains methods that relate to the runtime usage of the control
     # object. Note that these are subject to override in the
@@ -44,36 +48,49 @@ module NewRelic
       # init_config({}) which is called one or more times.
       #
       def init_plugin(options={})
-        yaml = Agent::Configuration::YamlSource.new(@config_file_path, options[:env] || env)
-        Agent.config.replace_or_add_config(yaml, 1)
+        env = options[:env] || self.env
+        Agent.logger.info("Starting the New Relic agent in #{env.inspect} environment.")
+        Agent.logger.info("To prevent agent startup add a NEWRELIC_AGENT_ENABLED=false environment variable or modify the #{env.inspect} section of your newrelic.yml.")
 
-        Agent.config.replace_or_add_config(Agent::Configuration::ManualSource.new(options), 1)
+        configure_agent(env, options)
 
         # Be sure to only create once! RUBY-1020
         if ::NewRelic::Agent.logger.is_startup_logger?
-          ::NewRelic::Agent.logger = NewRelic::Agent::AgentLogger.new(Agent.config, root, options.delete(:log))
+          ::NewRelic::Agent.logger = NewRelic::Agent::AgentLogger.new(root, options.delete(:log))
         end
 
         # Merge the stringified options into the config as overrides:
         environment_name = options.delete(:env) and self.env = environment_name
-        dispatcher_instance_id = options.delete(:dispatcher_instance_id) and @local_env.dispatcher_instance_id = dispatcher_instance_id
 
         NewRelic::Agent::PipeChannelManager.listener.start if options.delete(:start_channel_listener)
 
         # An artifact of earlier implementation, we put both #add_method_tracer and #trace_execution
         # methods in the module methods.
         Module.send :include, NewRelic::Agent::MethodTracer::ClassMethods
-        Module.send :include, NewRelic::Agent::MethodTracer::InstanceMethods
+        Module.send :include, NewRelic::Agent::MethodTracer
         init_config(options)
         NewRelic::Agent.agent = NewRelic::Agent::Agent.instance
+        NewRelic::Agent.agent.start_service_if_needed
         if Agent.config[:agent_enabled] && !NewRelic::Agent.instance.started?
           start_agent
           install_instrumentation
-          load_samplers unless Agent.config[:disable_samplers]
-          local_env.gather_environment_info
-          append_environment_info
         elsif !Agent.config[:agent_enabled]
           install_shim
+        else
+          DependencyDetection.detect!
+        end
+      end
+
+      def configure_agent(env, options)
+        manual = Agent::Configuration::ManualSource.new(options)
+        Agent.config.replace_or_add_config(manual)
+
+        config_file_path = @config_file_override || Agent.config[:config_path]
+        Agent.config.replace_or_add_config(Agent::Configuration::YamlSource.new(config_file_path, env))
+
+        if Agent.config[:high_security]
+          Agent.logger.info("Installing high security configuration based on local configuration")
+          Agent.config.replace_or_add_config(Agent::Configuration::HighSecuritySource.new(Agent.config))
         end
       end
 
@@ -111,28 +128,10 @@ module NewRelic
 
       protected
 
-      # Append framework specific environment information for uploading to
-      # the server for change detection.  Override in subclasses
-      def append_environment_info; end
-
-      # Asks bundler to tell us which gemspecs are loaded in the
-      # current process
-      def bundler_gem_list
-        if defined?(Bundler) && Bundler.instance_eval do @load end
-          Bundler.load.specs.map do |spec|
-            version = (spec.respond_to?(:version) && spec.version)
-            spec.name + (version ? "(#{version})" : "")
-          end
-        else
-          []
-        end
-      end
-
-
       def initialize(local_env, config_file_override=nil)
         @local_env = local_env
         @instrumentation_files = []
-        @config_file_path = config_file_override || Agent.config[:config_path]
+        @config_file_override = config_file_override
       end
 
       def root

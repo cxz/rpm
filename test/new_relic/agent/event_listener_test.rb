@@ -1,6 +1,10 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','test_helper'))
 
-class EventListenerTest < Test::Unit::TestCase
+class EventListenerTest < Minitest::Test
 
   def setup
     @events = NewRelic::Agent::EventListener.new
@@ -13,6 +17,24 @@ class EventListenerTest < Test::Unit::TestCase
       @called_with = args
     end
   end
+
+
+  #
+  # Helpers
+  #
+
+  def assert_was_called
+    assert @called, "Event wasn't called"
+  end
+
+  def assert_was_not_called
+    assert !@called, "Event was called"
+  end
+
+
+  #
+  # Tests
+  #
 
   def test_notifies
     @events.subscribe(:before_call, &@check_method)
@@ -37,10 +59,12 @@ class EventListenerTest < Test::Unit::TestCase
     @events.subscribe(:my_event) {}
   end
 
+  def test_clear
+    @events.subscribe(:after_call, &@check_method)
+    @events.clear
+    @events.notify(:after_call)
 
-  def assert_was_called
-    assert @called, "Event wasn't called"
+    assert_was_not_called
   end
 
 end
-

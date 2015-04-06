@@ -1,63 +1,48 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'/../test_helper'))
 
-class NewRelic::ControlTest < Test::Unit::TestCase
+class NewRelic::ControlTest < Minitest::Test
   attr_reader :control
 
   def setup
     @control =  NewRelic::Control.instance
     raise 'oh geez, wrong class' unless NewRelic::Control.instance.is_a?(::NewRelic::Control::Frameworks::Test)
+    NewRelic::Agent.config.reset_to_defaults
   end
 
   def shutdown
     NewRelic::Agent.shutdown
   end
 
-
-  def test_test_config
-    if defined?(::Rails) && ::Rails::VERSION::MAJOR.to_i == 4
-      assert_equal :rails4, control.app
-    elsif defined?(::Rails) && ::Rails::VERSION::MAJOR.to_i == 3
-      assert_equal :rails3, control.app
-    elsif defined?(::Rails)
-      assert_equal :rails, control.app
-    else
-      assert_equal :test, control.app
-    end
-    assert_equal :test, control.framework
-    assert_match /test/i, control.local_env.dispatcher_instance_id
-    assert("" == NewRelic::Agent.config[:dispatcher].to_s,
-           "Expected dispatcher to be empty, but was #{NewRelic::Agent.config[:dispatcher].to_s}")
-    assert !NewRelic::Agent.config[:monitor_mode]
-    control.local_env
-  end
-
   def test_settings_accessor
-    assert_not_nil control.settings
+    refute_nil control.settings
   end
 
   def test_root
     assert File.directory?(NewRelic::Control.newrelic_root), NewRelic::Control.newrelic_root
-    if defined?(Rails)
+    if defined?(Rails::VERSION)
       assert File.directory?(File.join(NewRelic::Control.newrelic_root, "lib")), NewRelic::Control.newrelic_root +  "/lib"
     end
   end
 
   def test_info
-    NewRelic::Agent.manual_start(:dispatcher_instance_id => 'test')
-    props = NewRelic::Control.instance.local_env.snapshot
-    if defined?(Rails)
-      assert_match /jdbc|postgres|mysql|sqlite/, props.assoc('Database adapter').last, props.inspect
+    NewRelic::Agent.manual_start
+    if defined?(Rails::VERSION)
+      assert_match(/jdbc|postgres|mysql|sqlite/, NewRelic::EnvironmentReport.new["Database adapter"])
     end
   end
 
   def test_resolve_ip_for_localhost
-    with_config(:ssl => false, :verify_certificate => false) do
+    with_config(:ssl => false) do
       assert_equal nil, control.send(:convert_to_ip_address, 'localhost')
     end
   end
 
   def test_resolve_ip_for_non_existent_domain
-    with_config(:ssl => false, :verify_certificate => false) do
+    with_config(:ssl => false) do
       Resolv.stubs(:getaddress).raises(Resolv::ResolvError)
       IPSocket.stubs(:getaddress).raises(SocketError)
       assert_equal nil, control.send(:convert_to_ip_address, 'q1239988737.us')
@@ -65,17 +50,17 @@ class NewRelic::ControlTest < Test::Unit::TestCase
   end
 
   def test_resolves_valid_ip
-    with_config(:ssl => false, :verify_certificate => false) do
+    with_config(:ssl => false) do
       Resolv.stubs(:getaddress).with('collector.newrelic.com').returns('204.93.223.153')
       assert_equal '204.93.223.153', control.send(:convert_to_ip_address, 'collector.newrelic.com')
     end
   end
 
   def test_do_not_resolve_if_we_need_to_verify_a_cert
-    with_config(:ssl => false, :verify_certificate => false) do
+    with_config(:ssl => false) do
       assert_equal nil, control.send(:convert_to_ip_address, 'localhost')
     end
-    with_config(:ssl => true, :verify_certificate => true) do
+    with_config(:ssl => true) do
       assert_equal 'localhost', control.send(:convert_to_ip_address, 'localhost')
     end
   end
@@ -117,7 +102,7 @@ class NewRelic::ControlTest < Test::Unit::TestCase
     Object.instance_eval { remove_const :Resolv}
     Object.instance_eval {remove_const:'IPSocket' }
 
-    with_config(:ssl => false, :verify_certificate => false) do
+    with_config(:ssl => false) do
       assert_equal(nil, control.send(:convert_to_ip_address, 'collector.newrelic.com'), "DNS is down, should be no IP for server")
     end
 
@@ -137,22 +122,22 @@ class NewRelic::ControlTest < Test::Unit::TestCase
   def test_transaction_tracer_disabled
     with_config(:'transaction_tracer.enabled' => false,
                 :developer_mode => false, :monitor_mode => true) do
-      assert(!NewRelic::Agent::Agent.instance.transaction_sampler.enabled?,
+      assert(!NewRelic::Agent.instance.transaction_sampler.enabled?,
              'transaction tracer enabled when config calls for disabled')
     end
   end
 
   def test_sql_tracer_disabled
     with_config(:'slow_sql.enabled' => false, :monitor_mode => true) do
-      assert(!NewRelic::Agent::Agent.instance.sql_sampler.enabled?,
+      assert(!NewRelic::Agent.instance.sql_sampler.enabled?,
              'sql tracer enabled when config calls for disabled')
     end
   end
 
   def test_sql_tracer_disabled_with_record_sql_false
     with_config(:slow_sql => { :enabled => true, :record_sql => 'off' }) do
-      assert(!NewRelic::Agent::Agent.instance.sql_sampler.enabled?,
-             'sql tracer enabled when config calls for disabled')
+      refute NewRelic::Agent.instance.sql_sampler.enabled?,
+             'sql tracer enabled when config calls for disabled'
     end
   end
 
@@ -160,35 +145,88 @@ class NewRelic::ControlTest < Test::Unit::TestCase
     with_config(:'transaction_tracer.enabled' => false,
                 :'slow_sql.enabled' => true,
                 :developer_mode => false, :monitor_mode => true) do
-      assert(!NewRelic::Agent::Agent.instance.sql_sampler.enabled?,
-             'sql enabled when transaction tracer disabled')
+      refute NewRelic::Agent.instance.sql_sampler.enabled?,
+             'sql enabled when transaction tracer disabled'
     end
   end
 
   def test_sql_tracer_disabled_when_tt_disabled_by_server
-    with_config({:'slow_sql.enabled' => true,
-                  :'transaction_tracer.enabled' => true,
-                  :monitor_mode => true}, 2) do
+    with_config_low_priority({
+                 :'slow_sql.enabled'           => true,
+                 :'transaction_tracer.enabled' => true,
+                 :monitor_mode                 => true}) do
       NewRelic::Agent.instance.finish_setup('collect_traces' => false)
 
-      assert(!NewRelic::Agent::Agent.instance.sql_sampler.enabled?,
-             'sql enabled when tracing disabled by server')
+      refute NewRelic::Agent::Agent.instance.sql_sampler.enabled?,
+             'sql enabled when tracing disabled by server'
     end
   end
 
   def test_init_plugin_loads_samplers_enabled
-    NewRelic::Agent.shutdown
-    with_config(:disable_samplers => false, :agent_enabled => true) do
+    reset_agent
+
+    with_config(:disable_samplers       => false,
+                :disable_harvest_thread => true,
+                :agent_enabled          => true,
+                :monitor_mode           => true,
+                :license_key            => 'a'*40) do
       NewRelic::Control.instance.init_plugin
-      assert NewRelic::Agent.instance.stats_engine.send(:harvest_samplers).any?
+      assert NewRelic::Agent.instance.harvest_samplers.any?
     end
   end
 
   def test_init_plugin_loads_samplers_disabled
-    NewRelic::Agent.shutdown
-    with_config(:disable_samplers => true, :agent_enabled => true) do
+    reset_agent
+
+    with_config(:disable_samplers       => true,
+                :disable_harvest_thread => true,
+                :agent_enabled          => true,
+                :monitor_mode           => true,
+                :license_key            => 'a'*40) do
       NewRelic::Control.instance.init_plugin
-      assert NewRelic::Agent.instance.stats_engine.send(:harvest_samplers).empty?
+      refute NewRelic::Agent.instance.harvest_samplers.any?
     end
+  end
+
+  def test_agent_not_starting_does_not_load_samplers
+    reset_agent
+
+    NewRelic::Agent.instance.stubs(:defer_for_delayed_job?).returns(true)
+
+    with_config(:disable_samplers       => false,
+                :disable_harvest_thread => true,
+                :agent_enabled          => true,
+                :monitor_mode           => true,
+                :license_key            => 'a'*40) do
+      NewRelic::Control.instance.init_plugin
+      refute NewRelic::Agent.instance.already_started?
+      refute NewRelic::Agent.instance.harvest_samplers.any?
+    end
+  end
+
+  def test_agent_starting_after_fork_does_load_samplers
+    reset_agent
+
+    NewRelic::Agent.instance.stubs(:defer_for_delayed_job?).returns(true)
+
+    with_config(:disable_samplers       => false,
+                :disable_harvest_thread => true,
+                :agent_enabled          => true,
+                :monitor_mode           => true,
+                :license_key            => 'a'*40) do
+      NewRelic::Control.instance.init_plugin
+      NewRelic::Agent.instance.stubs(:defer_for_delayed_job?).returns(false)
+      NewRelic::Agent.after_fork
+      assert NewRelic::Agent.instance.already_started?
+      assert NewRelic::Agent.instance.harvest_samplers.any?
+    end
+  end
+
+  def reset_agent
+    NewRelic::Agent.shutdown
+    NewRelic::Agent.instance.harvest_samplers.clear
+    NewRelic::Agent.instance.instance_variable_set(:@connect_state, :pending)
+    NewRelic::Agent.instance.instance_variable_set(:@worker_thread, nil)
+    NewRelic::Agent.instance.harvester.instance_variable_set(:@starting_pid, nil)
   end
 end

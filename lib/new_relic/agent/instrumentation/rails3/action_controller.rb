@@ -1,16 +1,12 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic
   module Agent
     module Instrumentation
       module Rails3
         module ActionController
-          def self.newrelic_write_attr(attr_name, value) # :nodoc:
-            write_inheritable_attribute(attr_name, value)
-          end
-
-          def self.newrelic_read_attr(attr_name) # :nodoc:
-            read_inheritable_attribute(attr_name)
-          end
-
           # determine the path that is used in the metric name for
           # the called controller action
           def newrelic_metric_path(action_name_override = nil)
@@ -22,14 +18,7 @@ module NewRelic
             end
           end
 
-          def process_action(*args)
-            # skip instrumentation if we are in an ignored action
-            if _is_filtered?('do_not_trace')
-              NewRelic::Agent.disable_all_tracing do
-                return super
-              end
-            end
-
+          def process_action(*args) #THREAD_LOCAL_ACCESS
             perform_action_with_newrelic_trace(:category => :controller, :name => self.action_name, :path => newrelic_metric_path, :params => request.filtered_parameters, :class_name => self.class.name)  do
               super
             end
@@ -44,7 +33,7 @@ module NewRelic
               if options[:file]
                 "file"
               elsif identifier.nil?
-                "(unknown)"
+                ::NewRelic::Agent::UNKNOWN_METRIC
               elsif identifier.include? '/' # this is a filepath
                 identifier.split('/')[-2..-1].join('/')
               else
@@ -128,7 +117,7 @@ end
 DependencyDetection.defer do
   @name = :rails31_view
 
-  # We can't be sure that this wil work with future versions of Rails 3.
+  # We can't be sure that this will work with future versions of Rails 3.
   # Currently enabled for Rails 3.1 and 3.2
   depends_on do
     defined?(::Rails) && ::Rails::VERSION::MAJOR.to_i == 3 && ([1,2].member?(::Rails::VERSION::MINOR.to_i))
@@ -151,8 +140,8 @@ DependencyDetection.defer do
         # This is needed for rails 3.2 compatibility
         @details = extract_details(options) if respond_to? :extract_details, true
         identifier = determine_template(options) ? determine_template(options).identifier : nil
-        str = "View/#{NewRelic::Agent::Instrumentation::Rails3::ActionView::NewRelic.template_metric(identifier, options)}/Rendering"
-        trace_execution_scoped str do
+        scope_name = "View/#{NewRelic::Agent::Instrumentation::Rails3::ActionView::NewRelic.template_metric(identifier, options)}/Rendering"
+        trace_execution_scoped scope_name do
           render_without_newrelic(context, options)
         end
       end
@@ -164,17 +153,16 @@ DependencyDetection.defer do
     ActionView::PartialRenderer.class_eval do
       include NewRelic::Agent::MethodTracer
 
-      def render_with_newrelic(*args, &block)
-        setup(*args, &block)
-        identifier = find_partial ? find_partial.identifier : nil
-        str = "View/#{NewRelic::Agent::Instrumentation::Rails3::ActionView::NewRelic.template_metric(identifier)}/Partial"
-        trace_execution_scoped str do
-          render_without_newrelic(*args, &block)
+      def instrument_with_newrelic(name, payload = {}, &block)
+        identifier = payload[:identifier]
+        scope_name = "View/#{NewRelic::Agent::Instrumentation::Rails3::ActionView::NewRelic.template_metric(identifier)}/Partial"
+        trace_execution_scoped(scope_name) do
+          instrument_without_newrelic(name, payload, &block)
         end
       end
 
-      alias_method :render_without_newrelic, :render
-      alias_method :render, :render_with_newrelic
+      alias_method :instrument_without_newrelic, :instrument
+      alias_method :instrument, :instrument_with_newrelic
     end
   end
 end

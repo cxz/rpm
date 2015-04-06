@@ -1,20 +1,21 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require File.expand_path(File.join(File.dirname(__FILE__),'..','..','..','test_helper'))
-class NewRelic::Agent::Agent::StartTest < Test::Unit::TestCase
+class NewRelic::Agent::Agent::StartTest < Minitest::Test
   require 'new_relic/agent/agent'
   include NewRelic::Agent::Agent::Start
 
   def setup
-    ENV['NEW_RELIC_APP_NAME'] = 'start_test'
-    NewRelic::Agent.reset_config
-  end
-
-  def teardown
-    ENV['NEW_RELIC_APP_NAME'] = nil
-    NewRelic::Agent.reset_config
+    @harvester = stub("dummy harvester")
+    @harvest_samplers = stub("dummy sampler collection")
   end
 
   def test_already_started_positive
-    ::Logger.any_instance.expects(:error).with("Agent Started Already!")
+    dummy_logger = mock
+    dummy_logger.expects(:error).with("Agent Started Already!")
+    NewRelic::Agent.stubs(:logger).returns(dummy_logger)
     self.expects(:started?).returns(true)
     assert already_started?, "should have already started"
   end
@@ -55,18 +56,24 @@ class NewRelic::Agent::Agent::StartTest < Test::Unit::TestCase
   end
 
   def test_check_config_and_start_agent_normal
+    @harvester.expects(:mark_started)
+    @harvest_samplers.expects(:load_samplers)
+    self.expects(:generate_environment_report)
     self.expects(:start_worker_thread)
     self.expects(:install_exit_handler)
-    with_config(:sync_startup => false, :monitor_mode => true, :license_key => 'a' * 40) do
+    with_config(:dispatcher => 'test', :sync_startup => false, :monitor_mode => true, :license_key => 'a' * 40) do
       check_config_and_start_agent
     end
   end
 
   def test_check_config_and_start_agent_sync
+    @harvester.expects(:mark_started)
+    @harvest_samplers.expects(:load_samplers)
+    self.expects(:generate_environment_report)
     self.expects(:connect_in_foreground)
     self.expects(:start_worker_thread)
     self.expects(:install_exit_handler)
-    with_config(:sync_startup => true, :monitor_mode => true, :license_key => 'a' * 40) do
+    with_config(:dispatcher => 'test', :sync_startup => true, :monitor_mode => true, :license_key => 'a' * 40) do
       check_config_and_start_agent
     end
   end
@@ -84,7 +91,7 @@ class NewRelic::Agent::Agent::StartTest < Test::Unit::TestCase
   def test_install_exit_handler_positive
     NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(false)
     NewRelic::LanguageSupport.expects(:using_engine?).with('jruby').returns(false)
-    self.expects(:using_sinatra?).returns(false)
+    self.expects(:sinatra_classic_app?).returns(false)
     # we are overriding at_exit above, to immediately return, so we can
     # test the shutdown logic. It's somewhat unfortunate, but we can't
     # kill the interpreter during a test.
@@ -105,7 +112,7 @@ class NewRelic::Agent::Agent::StartTest < Test::Unit::TestCase
     with_config(:send_data_one_exit => true) do
       NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(false)
       NewRelic::LanguageSupport.expects(:using_engine?).with('jruby').returns(false)
-      self.expects(:using_sinatra?).returns(true)
+      self.expects(:sinatra_classic_app?).returns(true)
       install_exit_handler
       NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(false)
       NewRelic::LanguageSupport.expects(:using_engine?).with('jruby').returns(true)
@@ -174,26 +181,6 @@ class NewRelic::Agent::Agent::StartTest < Test::Unit::TestCase
     end
   end
 
-  def test_log_unless_positive
-    # should not log
-    assert log_unless(true, :warn, "DURRR")
-  end
-
-  def test_log_unless_negative
-    # should log
-    expects_logging(:warn, "DURRR")
-    assert !log_unless(false, :warn, "DURRR")
-  end
-
-  def test_log_if_positive
-    expects_logging(:warn, "WHEE")
-    assert log_if(true, :warn, "WHEE")
-  end
-
-  def test_log_if_negative
-    assert !log_if(false, :warn, "WHEE")
-  end
-
   private
 
   def mocked_control
@@ -202,4 +189,3 @@ class NewRelic::Agent::Agent::StartTest < Test::Unit::TestCase
     fake_control
   end
 end
-

@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic
   # We really don't want to send bad values to the collector, and it doesn't
   # accept types like Rational that have occasionally slipped into our data.
@@ -13,8 +17,18 @@ module NewRelic
       0
     end
 
+    def int_or_nil(value, context=nil)
+      return nil if value.nil?
+      Integer(value)
+    rescue => error
+      log_failure(value, Integer, context, error)
+      nil
+    end
+
     def float(value, context=nil)
-      Float(value)
+      result = Float(value)
+      raise "Value #{result.inspect} is not finite." unless result.finite?
+      result
     rescue => error
       log_failure(value, Float, context, error)
       0.0
@@ -26,6 +40,38 @@ module NewRelic
     rescue => error
       log_failure(value.class, String, context, error)
       ""
+    end
+
+    # Convert a hash into a format acceptable to be included with Transaction
+    # event data.
+    #
+    # We accept a hash and will return a new hash where all of the keys
+    # have been converted to strings.  As values we only allow Strings,
+    # Floats, Integers. Symbols are also allowed but are converted to strings.
+    # Any values of other type (e.g. Hash, Array, any other class) are
+    # discarded. Their keys are also removed from the results hash.
+    def event_params(value, context=nil)
+      unless value.is_a? Hash
+        raise ArgumentError, "Expected Hash but got #{value.class}"
+      end
+      value.inject({}) do |memo, (key, val)|
+        case val
+        when String, Integer, TrueClass, FalseClass
+          memo[key.to_s] = val
+        when Float
+          if val.finite?
+            memo[key.to_s] = val
+          else
+            memo[key.to_s] = nil
+          end
+        when Symbol
+          memo[key.to_s] = val.to_s
+        end
+        memo
+      end
+    rescue => error
+      log_failure(value.class, 'valid event params', context, error)
+      {}
     end
 
     def log_failure(value, type, context, error)

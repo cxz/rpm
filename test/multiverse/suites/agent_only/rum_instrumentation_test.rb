@@ -1,64 +1,67 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'rack/test'
 require 'new_relic/rack/browser_monitoring'
 require './testing_app'
 
-class RumAutoTest < Test::Unit::TestCase
+class RumAutoTest < Minitest::Test
 
   attr_reader :app
-  include Rack::Test::Methods
 
-  def setup
+  include Rack::Test::Methods
+  include MultiverseHelpers
+
+  JS_AGENT_LOADER = "JS_AGENT_LOADER"
+
+  LOADER_REGEX = "\n<script.*>JS_AGENT_LOADER</script>"
+  CONFIG_REGEX = "\n<script.*>.*NREUM.info=.*</script>"
+
+  setup_and_teardown_agent(:application_id => 'appId',
+                           :beacon => 'beacon',
+                           :browser_key => 'browserKey',
+                           :js_agent_loader => JS_AGENT_LOADER) do |collector|
+    collector.stub('connect', {
+      'transaction_name_rules' => [{"match_expression" => "ignored_transaction",
+                                    "ignore"           => true}],
+      'agent_run_id' => 1,
+    })
+  end
+
+  def after_setup
     @inner_app = TestingApp.new
     @app = NewRelic::Rack::BrowserMonitoring.new(@inner_app)
-
-    NewRelic::Agent.manual_start(:browser_key => 'browserKey', :application_id => 'appId',
-                                 :beacon => 'beacon', :episodes_file => 'this_is_my_file')
-    NewRelic::Agent.instance.instance_variable_set(
-      :@beacon_configuration, NewRelic::Agent::BeaconConfiguration.new)
   end
 
-  def teardown
-    NewRelic::Agent.shutdown
-  end
-
-  def test_autoinstrumenation_is_active
+  def test_autoinstrumentation_is_active
     @inner_app.response = "<html><head><title>W00t!</title></head><body><p>Hello World</p></body></html>"
     get '/'
-    assert(last_response.body =~ %r|<script|, "response body should include RUM auto instrumentation js:\n #{last_response.body}")
-    assert(last_response.body =~ %r|NREUMQ|, "response body should include RUM auto instrumentation js:\n #{last_response.body}")
+    assert_response_includes("<script", JS_AGENT_LOADER, "NREUM")
   end
 
-  def test_autoinstrumenation_with_basic_page_puts_header_at_beggining_of_head
+  def test_autoinstrumentation_with_basic_page_puts_header_at_beginning_of_head
     @inner_app.response = "<html><head><title>foo</title></head><body><p>Hello World</p></body></html>"
     get '/'
-    assert(last_response.body.include?('<html><head><script type="text/javascript">var NREUMQ=NREUMQ||[];NREUMQ.push(["mark","firstbyte",new Date().getTime()]);</script><title>foo</title></head><body>'))
+    assert_response_includes(%Q[<html><head>#{CONFIG_REGEX}#{LOADER_REGEX}<title>foo</title></head>])
   end
 
-  def test_autoinstrumenation_with_body_only_puts_header_before_body
+  def test_autoinstrumentation_with_body_only_puts_header_before_body
     @inner_app.response = "<html><body><p>Hello World</p></body></html>"
     get '/'
-    assert(last_response.body.include?('<html><script type="text/javascript">var NREUMQ=NREUMQ||[];NREUMQ.push(["mark","firstbyte",new Date().getTime()]);</script><body>'))
+    assert_response_includes %Q[<html>#{CONFIG_REGEX}#{LOADER_REGEX}<body>]
   end
 
-  def test_autoinstrumenation_with_X_UA_Compatible_puts_header_at_end_of_head
-    @inner_app.response = '<html><head><meta http-equiv="X-UA-Compatible" content="IE=8;FF=3;OtherUA=4" /></head><body><p>Hello World</p></body></html>'
+  def test_autoinstrumentation_with_X_UA_Compatible_puts_header_after_meta_tag
+    @inner_app.response = '<html><head><meta http-equiv="X-UA-Compatible"/></head><body><p>Hello World</p></body></html>'
     get '/'
-    assert(last_response.body.include?(
-      '<html><head><meta http-equiv="X-UA-Compatible" content="IE=8;FF=3;OtherUA=4" /><script type="text/javascript">var NREUMQ=NREUMQ||[];NREUMQ.push(["mark","firstbyte",new Date().getTime()]);</script></head><body>'
-    ))
+    assert_response_includes(%Q[<html><head><meta http-equiv="X-UA-Compatible"/>#{CONFIG_REGEX}#{LOADER_REGEX}</head><body>])
   end
 
-  # regression
-  def test_autoinstrumenation_fails_gracefully_with_X_UA_Compatible_and_no_close_head_tag_puts_header_before_body_tag
-    @inner_app.response = '<html><head><meta http-equiv="X-UA-Compatible" content="IE=8;FF=3;OtherUA=4" /><body><p>Hello World</p></body></html>'
-    get '/'
-    assert(!last_response.body.include?(%'NREUMQ'))
-  end
-
-  def test_autoinstrumenation_doesnt_run_for_crazy_shit_like_this
+  def test_autoinstrumentation_doesnt_run_for_crazy_shit_like_this
     @inner_app.response = '<html><head <body </body>'
     get '/'
-    assert_equal('<html><head <body </body>', last_response.body)
+    assert_response_includes('<html><head <body </body>')
   end
 
   def test_content_length_is_correctly_set_if_present
@@ -77,5 +80,18 @@ class RumAutoTest < Test::Unit::TestCase
     get '/'
     assert_equal(last_response.body, body)
   end
-end
 
+  def test_rum_headers_are_not_injected_in_ignored_txn
+    body = "<html><head><title>W00t!</title></head><body><p>Hello World</p></body></html>"
+    @inner_app.response = body
+    get '/', 'transaction_name' => 'ignored_transaction'
+    assert_equal(last_response.body, body)
+  end
+
+  def assert_response_includes(*texts)
+    texts.each do |text|
+      assert_match(Regexp.new(text), last_response.body,
+                   "Response missing #{text} for JS Agent instrumentation:\n #{last_response.body}")
+    end
+  end
+end

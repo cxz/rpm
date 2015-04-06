@@ -1,25 +1,14 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 module NewRelic::LanguageSupport
   extend self
 
-  module Control
-    def self.included(base)
-      # need to use syck rather than psych when possible
-      if defined?(::YAML::ENGINE)
-        if !NewRelic::LanguageSupport.using_engine?('jruby') &&
-            (NewRelic::LanguageSupport.using_version?('1.9.1') ||
-             NewRelic::LanguageSupport.using_version?('1.9.2'))
-          base.class_eval do
-            def load_newrelic_yml(*args)
-              yamler = ::YAML::ENGINE.yamler
-              ::YAML::ENGINE.yamler = 'syck'
-              val = super
-              ::YAML::ENGINE.yamler = yamler
-              val
-            end
-          end
-        end
-      end
-    end
+  # need to use syck rather than psych when possible
+  def needs_syck?
+    !NewRelic::LanguageSupport.using_engine?('jruby') &&
+         NewRelic::LanguageSupport.using_version?('1.9.2')
   end
 
   @@forkable = nil
@@ -75,9 +64,51 @@ module NewRelic::LanguageSupport
     end
   end
 
+  def gc_profiler_usable?
+    if defined?(::GC::Profiler) && !jruby?
+      true
+    else
+      false
+    end
+  end
+
+  def gc_profiler_enabled?
+    if gc_profiler_usable? && ::GC::Profiler.enabled? && !::NewRelic::Agent.config[:disable_gc_profiler]
+      true
+    else
+      false
+    end
+  end
+
+  def object_space_usable?
+    if defined?(::JRuby) && JRuby.respond_to?(:runtime)
+      JRuby.runtime.is_object_space_enabled
+    elsif defined?(::ObjectSpace) && !rubinius?
+      true
+    else
+      false
+    end
+  end
+
+  def jruby?
+    defined?(RUBY_ENGINE) && RUBY_ENGINE == 'jruby'
+  end
+
+  def rubinius?
+    defined?(RUBY_ENGINE) && RUBY_ENGINE == 'rbx'
+  end
+
+  def ree?
+    defined?(RUBY_DESCRIPTION) && RUBY_DESCRIPTION =~ /Ruby Enterprise Edition/
+  end
+
   def using_version?(version)
     numbers = version.split('.')
     numbers == ::RUBY_VERSION.split('.')[0, numbers.size]
+  end
+
+  def supports_string_encodings?
+    RUBY_VERSION >= '1.9.0'
   end
 
   def test_forkability

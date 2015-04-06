@@ -1,3 +1,7 @@
+# encoding: utf-8
+# This file is distributed under New Relic's license terms.
+# See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
+
 require 'thread'
 module NewRelic
   module Agent
@@ -5,6 +9,9 @@ module NewRelic
     # A worker loop executes a set of registered tasks on a single thread.
     # A task is a proc or block with a specified call period in seconds.
     class WorkerLoop
+
+      attr_accessor :period, :propagate_errors
+      attr_reader :iterations
 
       # Optional argument :duration (in seconds) for how long the worker loop runs
       # or :limit (integer) for max number of iterations
@@ -15,45 +22,53 @@ module NewRelic
         @duration = opts[:duration] if opts[:duration]
         @limit = opts[:limit] if opts[:limit]
         @iterations = 0
+        @propagate_errors = opts.fetch(:propagate_errors, false)
       end
 
-      # returns a class-level memoized mutex to make sure we don't run overlapping
-      def lock
-        @@lock ||= Mutex.new
+      # Reset state that is changed by running the worker loop
+      def setup(period, task)
+        @task = task
+        @period = period if period
+        @should_run = true
+        @iterations = 0
+
+        now = Time.now
+        @deadline = now + @duration if @duration
+        @next_invocation_time = (now + @period)
       end
 
       # Run infinitely, calling the registered tasks at their specified
       # call periods.  The caller is responsible for creating the thread
       # that runs this worker loop.  This will run the task immediately.
       def run(period=nil, &block)
-        @deadline = Time.now + @duration if @duration
-        @period = period if period
-        @next_invocation_time = (Time.now + @period)
-        @task = block
+        setup(period, block)
         while keep_running? do
-          while @now < @next_invocation_time
-            # sleep until this next task's scheduled invocation time
-            sleep_time = @next_invocation_time - @now
-            sleep sleep_time if sleep_time > 0
-            @now = Time.now
-          end
+          sleep_time = schedule_next_invocation
+          sleep(sleep_time) if sleep_time > 0
           run_task if keep_running?
-          @iterations += 1 if !@limit.nil?
+          @iterations += 1
         end
+      end
+
+      def schedule_next_invocation
+        now = Time.now
+        while @next_invocation_time <= now && @period > 0
+          @next_invocation_time += @period
+        end
+        @next_invocation_time - Time.now
       end
 
       # a simple accessor for @should_run
       def keep_running?
-        @now = Time.now
         @should_run && under_duration? && under_limit?
       end
 
       def under_duration?
-        !@deadline || @now < @deadline
+        !@deadline || Time.now < @deadline
       end
 
       def under_limit?
-        !@limit || @iterations < @limit
+        @limit.nil? || @iterations < @limit
       end
 
       # Sets @should_run to false. Returns false
@@ -65,30 +80,18 @@ module NewRelic
       # possible errors. Also updates the execution time so that the
       # next run occurs on schedule, even if we execute at some odd time
       def run_task
-        begin
-          lock.synchronize do
+        if @propagate_errors
+          @task.call
+        else
+          begin
             @task.call
+          rescue NewRelic::Agent::ForceRestartException, NewRelic::Agent::ForceDisconnectException
+            # blow out the loop
+            raise
+          rescue => e
+            # Don't blow out the stack for anything that hasn't already propagated
+            ::NewRelic::Agent.logger.error "Error running task in Agent Worker Loop:", e
           end
-        rescue ServerError => e
-          ::NewRelic::Agent.logger.debug "Server Error:", e
-        rescue NewRelic::Agent::ForceRestartException, NewRelic::Agent::ForceDisconnectException
-          # blow out the loop
-          raise
-        rescue RuntimeError => e
-          # This is probably a server error which has been logged in the server along
-          # with your account name.
-          ::NewRelic::Agent.logger.error "Error running task in worker loop, likely a server error:", e
-        rescue Timeout::Error, NewRelic::Agent::ServerConnectionException
-          # Want to ignore these because they are handled already
-        rescue SystemExit, NoMemoryError, SignalException
-          raise
-        rescue => e
-          # Don't blow out the stack for anything that hasn't already propagated
-          ::NewRelic::Agent.logger.error "Error running task in Agent Worker Loop:", e
-        end
-        now = Time.now
-        while @next_invocation_time <= now && @period > 0
-          @next_invocation_time += @period
         end
       end
     end
